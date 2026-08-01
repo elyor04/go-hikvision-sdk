@@ -1,0 +1,69 @@
+package hikvision
+
+/*
+#include <stdlib.h>
+#include "shim.h"
+*/
+import "C"
+
+import "unsafe"
+
+// STDXMLConfig calls HCNetSDK's generic ISAPI-style configuration passthrough
+// (NET_DVR_STDXMLConfig). url is an ISAPI method+path such as
+// "GET /ISAPI/System/deviceInfo" or
+// "PUT /ISAPI/Traffic/channels/1/vehiclePositionControl?format=json"; body is
+// the request payload (XML or JSON, as the endpoint expects - empty for GET).
+// This is the primary escape hatch for the vast majority of HCNetSDK/ISAPI
+// functionality this package doesn't wrap with a dedicated method: anything
+// documented in the per-feature Device Network SDK developer guides (ANPR,
+// access control, thermal, ...) that exposes an ISAPI-style endpoint can be
+// driven through here.
+func (d *Device) STDXMLConfig(url string, body []byte) ([]byte, error) {
+	cURL := C.CString(url)
+	defer C.free(unsafe.Pointer(cURL))
+
+	var inPtr *C.uint8_t
+	if len(body) > 0 {
+		inPtr = (*C.uint8_t)(unsafe.Pointer(&body[0]))
+	}
+
+	const maxResponse = 8 << 20 // 8 MiB
+	out := make([]byte, maxResponse)
+	var outLen C.uint32_t
+
+	rc := C.hik_stdxml_config(C.int32_t(d.userID), cURL, inPtr, C.uint32_t(len(body)),
+		(*C.uint8_t)(unsafe.Pointer(&out[0])), C.uint32_t(len(out)), &outLen)
+	if rc != 0 {
+		return nil, lastError("STDXMLConfig")
+	}
+	return out[:outLen], nil
+}
+
+// GetConfig is the escape hatch for HCNetSDK's legacy binary configuration
+// API (NET_DVR_GetDVRConfig). command is one of the NET_DVR_GET_* command
+// codes from HCNetSDK.h; channel is the target channel (0 for device-wide
+// commands, per that command's documentation). Callers are responsible for
+// knowing and decoding the exact struct layout HCNetSDK.h documents for
+// command.
+func (d *Device) GetConfig(command uint32, channel int32, maxSize int) ([]byte, error) {
+	buf := make([]byte, maxSize)
+	var outLen C.uint32_t
+	rc := C.hik_get_dvr_config(C.int32_t(d.userID), C.uint32_t(command), C.int32_t(channel),
+		(*C.uint8_t)(unsafe.Pointer(&buf[0])), C.uint32_t(len(buf)), &outLen)
+	if rc != 0 {
+		return nil, lastError("GetDVRConfig")
+	}
+	return buf[:outLen], nil
+}
+
+// SetConfig is the write counterpart to GetConfig (NET_DVR_SetDVRConfig).
+func (d *Device) SetConfig(command uint32, channel int32, data []byte) error {
+	var inPtr *C.uint8_t
+	if len(data) > 0 {
+		inPtr = (*C.uint8_t)(unsafe.Pointer(&data[0]))
+	}
+	if C.hik_set_dvr_config(C.int32_t(d.userID), C.uint32_t(command), C.int32_t(channel), inPtr, C.uint32_t(len(data))) != 0 {
+		return lastError("SetDVRConfig")
+	}
+	return nil
+}

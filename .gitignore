@@ -1,0 +1,14 @@
+# Vendored proprietary Hikvision SDK binaries/headers - populated by scripts/vendor-sdk.*
+/internal/sdklib/
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+
+# Go
+*.test
+*.out
