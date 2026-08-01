@@ -161,11 +161,9 @@ See `examples/` for complete, runnable programs:
 
 Each example reads connection details from env vars (`HIK_HOST`, `HIK_PORT`,
 `HIK_USER`, `HIK_PASS`, and sometimes `HIK_CHANNEL`) since none of this can
-be exercised without a real device reachable from wherever you run it —
-there is no camera reachable from the environment this package was
-originally developed in, so these are the closest thing to an integration
-test available; run them yourself against your own hardware to validate
-end-to-end.
+be exercised without a real device reachable from wherever you run it. These
+have been run against real Hikvision hardware during development; run them
+yourself against your own hardware to validate end-to-end for your setup.
 
 ```powershell
 $env:HIK_HOST="192.168.1.64"; $env:HIK_USER="admin"; $env:HIK_PASS="..."
