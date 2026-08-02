@@ -87,6 +87,29 @@ vendor or redistribute Hikvision's binaries/headers — see [Licensing](#licensi
 3. `go build ./...` — requires `CGO_ENABLED=1` and a C++ compiler
    (`g++`/mingw-w64 on Windows, `g++`/`gcc` on Linux) on `PATH`.
 
+### Using this as a dependency in another module
+
+`go get github.com/elyor04/go-hikvision-sdk` resolves and adds the module
+fine — it's an ordinary public Go module. It does **not**, by itself, get
+you to a buildable state, and `go mod vendor` in your own project doesn't
+fix that either: vendoring only copies files belonging to actual Go
+packages (`hikvision/*.go`, `shim.cpp`, `shim.h`, `LICENSE`), not
+`scripts/vendor-sdk.*` (not part of a Go package) or `internal/sdklib/`
+(gitignored upstream, so there's nothing to copy). Without it, your build
+fails with something like:
+
+```
+shim.cpp: fatal error: HCNetSDK.h: No such file or directory
+```
+
+Recommended: clone this repo separately (not through `go get`), vendor the
+SDK into it as in Setup above, then point your module at that clone with a
+`replace` directive:
+
+```
+replace github.com/elyor04/go-hikvision-sdk => /path/to/your/clone/go-hikvision-sdk
+```
+
 ### Runtime library discovery
 
 `NET_DVR_SetSDKInitCfg(NET_SDK_INIT_CFG_SDK_PATH, ...)` is called
