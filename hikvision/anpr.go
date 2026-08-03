@@ -70,8 +70,11 @@ func (d *Device) PlateEvents(ctx context.Context) (<-chan PlateEvent, error) {
 }
 
 // manualSnapBufPool pools the scratch buffers ManualSnap hands to the SDK -
-// see the comment on scratchPool for why.
-var manualSnapBufPool = newScratchPool(2 << 20) // 2 MiB
+// see the comment on scratchPool for why. Matches CaptureJPEG's 4 MiB - both
+// are a single JPEG snapshot off a device, and shim.cpp's hik_manual_snap
+// silently truncates rather than erroring if the real image exceeds this
+// buffer, so it's worth staying generous here.
+var manualSnapBufPool = newScratchPool(4 << 20) // 4 MiB
 
 // ManualSnap triggers an immediate ANPR snapshot+recognition on channel
 // (NET_DVR_ManualSnap) and returns the decoded result, including the scene
