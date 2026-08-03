@@ -69,13 +69,17 @@ func (d *Device) PlateEvents(ctx context.Context) (<-chan PlateEvent, error) {
 	return out, nil
 }
 
+// manualSnapBufPool pools the scratch buffers ManualSnap hands to the SDK -
+// see the comment on scratchPool for why.
+var manualSnapBufPool = newScratchPool(2 << 20) // 2 MiB
+
 // ManualSnap triggers an immediate ANPR snapshot+recognition on channel
 // (NET_DVR_ManualSnap) and returns the decoded result, including the scene
 // snapshot image when the device provides one.
 func (d *Device) ManualSnap(channel int32) (PlateEvent, error) {
 	var out C.hik_plate_event
-	const maxImage = 2 << 20 // 2 MiB
-	sceneBuf := make([]byte, maxImage)
+	sceneBuf := manualSnapBufPool.Get()
+	defer manualSnapBufPool.Put(sceneBuf)
 	var sceneLen C.uint32_t
 
 	err := sdkCall0("ManualSnap", func() C.int32_t {

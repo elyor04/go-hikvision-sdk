@@ -286,6 +286,7 @@ hikvision/            the public Go package
   playback.go          FindRecordings, Playback, Download
   ptz.go                PTZ control/presets
   capture.go            JPEG snapshot
+  pool.go               Pooled scratch buffers (CaptureJPEG/STDXMLConfig/ManualSnap)
   alarm.go              Alarm subscription, exception callback
   anpr.go                License-plate recognition
   config.go              STDXMLConfig / GetConfig / SetConfig escape hatch

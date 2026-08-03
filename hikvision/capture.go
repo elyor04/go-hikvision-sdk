@@ -21,11 +21,15 @@ const (
 // enumerated resolution codes (see the Device Network SDK developer guide).
 const PicSizeAuto uint16 = 0xff
 
+// jpegBufPool pools the scratch buffers CaptureJPEG hands to the SDK - see
+// the comment on scratchPool for why.
+var jpegBufPool = newScratchPool(4 << 20) // 4 MiB is generous for a single snapshot
+
 // CaptureJPEG takes a single JPEG snapshot of channel and returns the
 // encoded image bytes (NET_DVR_CaptureJPEGPicture_NEW).
 func (d *Device) CaptureJPEG(channel int32, quality JPEGQuality) ([]byte, error) {
-	const maxJPEGSize = 4 << 20 // 4 MiB is generous for a single snapshot
-	buf := make([]byte, maxJPEGSize)
+	buf := jpegBufPool.Get()
+	defer jpegBufPool.Put(buf)
 
 	var written C.uint32_t
 	err := sdkCall0("CaptureJPEGPicture", func() C.int32_t {

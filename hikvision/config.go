@@ -11,6 +11,10 @@ import (
 	"unsafe"
 )
 
+// xmlConfigBufPool pools the scratch buffers STDXMLConfig hands to the SDK -
+// see the comment on scratchPool for why.
+var xmlConfigBufPool = newScratchPool(8 << 20) // 8 MiB
+
 // STDXMLConfig calls HCNetSDK's generic ISAPI-style configuration passthrough
 // (NET_DVR_STDXMLConfig). url is an ISAPI method+path such as
 // "GET /ISAPI/System/deviceInfo" or
@@ -30,8 +34,8 @@ func (d *Device) STDXMLConfig(url string, body []byte) ([]byte, error) {
 		inPtr = (*C.uint8_t)(unsafe.Pointer(&body[0]))
 	}
 
-	const maxResponse = 8 << 20 // 8 MiB
-	out := make([]byte, maxResponse)
+	out := xmlConfigBufPool.Get()
+	defer xmlConfigBufPool.Put(out)
 	var outLen C.uint32_t
 
 	err := sdkCall0("STDXMLConfig", func() C.int32_t {
@@ -41,10 +45,11 @@ func (d *Device) STDXMLConfig(url string, body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Copy into a right-sized slice rather than returning out[:outLen] - the
-	// maxResponse buffer is typically far larger than a real response, and
-	// out[:outLen] would keep the whole 8 MiB backing array alive for as long
-	// as the caller holds the result.
+	// Copy into a right-sized slice rather than returning out[:outLen] - out
+	// came from xmlConfigBufPool and is returned to the pool via defer above,
+	// so the result must not alias it; a right-sized copy also avoids handing
+	// the caller a slice backed by an 8 MiB array for what's typically a much
+	// smaller response.
 	return append([]byte(nil), out[:outLen]...), nil
 }
 
@@ -67,7 +72,13 @@ func (d *Device) GetConfig(command uint32, channel int32, maxSize int) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	return buf[:outLen], nil
+	// Copy into a right-sized slice rather than returning buf[:outLen] - see
+	// the identical comment in CaptureJPEG/STDXMLConfig above: otherwise the
+	// returned slice keeps the whole maxSize backing array alive for as long
+	// as the caller holds onto it, which matters when a caller passes a
+	// generous maxSize "to be safe" for a command whose actual response is
+	// much smaller.
+	return append([]byte(nil), buf[:outLen]...), nil
 }
 
 // SetConfig is the write counterpart to GetConfig (NET_DVR_SetDVRConfig).
