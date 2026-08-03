@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/elyor04/go-hikvision-sdk/hikvision"
 )
@@ -38,8 +39,10 @@ func main() {
 
 	fmt.Println("listening for ANPR events - Ctrl+C to stop")
 	for ev := range plates {
-		fmt.Printf("[plate] %q confidence=%d speed=%dkm/h at %s\n",
-			ev.License, ev.Confidence, ev.SpeedKMH, ev.CaptureTime.Format("2006-01-02T15:04:05Z"))
+		zoneName, zoneOffset := ev.CaptureTime.Zone()
+		fmt.Printf("[plate] %q confidence=%d speed=%dkm/h at %s (zone=%s offset=%ds, UTC=%s)\n",
+			ev.License, ev.Confidence, ev.SpeedKMH, ev.CaptureTime.Format(time.RFC3339),
+			zoneName, zoneOffset, ev.CaptureTime.UTC().Format(time.RFC3339))
 
 		if len(ev.SceneImage) > 0 {
 			name := fmt.Sprintf("plate-%s-scene.jpg", ev.CaptureTime.Format("20060102-150405"))

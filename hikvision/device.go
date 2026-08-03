@@ -66,19 +66,26 @@ func Login(opts LoginOptions) (*Device, error) {
 	}
 
 	var in C.hik_login_info
-	cSetString(&in.device_address[0], len(in.device_address), opts.Address)
+	addressFit := cSetString(&in.device_address[0], len(in.device_address), opts.Address)
 	in.port = C.uint16_t(opts.Port)
-	cSetString(&in.user_name[0], len(in.user_name), opts.Username)
-	cSetString(&in.password[0], len(in.password), opts.Password)
+	usernameFit := cSetString(&in.user_name[0], len(in.user_name), opts.Username)
+	passwordFit := cSetString(&in.password[0], len(in.password), opts.Password)
+	if !addressFit || !usernameFit || !passwordFit {
+		releaseInit()
+		return nil, fmt.Errorf("hikvision: Login: Address/Username/Password exceeds the SDK's fixed buffer size (max %d/%d/%d bytes)",
+			len(in.device_address)-1, len(in.user_name)-1, len(in.password)-1)
+	}
 	if opts.UseTLS {
 		in.use_https = 1
 	}
 
 	var out C.hik_device_info
-	userID := int32(C.hik_login(&in, &out))
-	if userID < 0 {
+	userID, err := sdkCallHandle("Login", func() C.int32_t {
+		return C.hik_login(&in, &out)
+	})
+	if err != nil {
 		releaseInit()
-		return nil, lastError("Login")
+		return nil, err
 	}
 
 	return &Device{
@@ -91,6 +98,27 @@ func Login(opts LoginOptions) (*Device, error) {
 // UserID returns the raw HCNetSDK user/session ID for this login. Useful
 // when using the escape-hatch functions in config.go.
 func (d *Device) UserID() int32 { return d.userID }
+
+// checkOpen reports an error if Close has already been called. RealPlay/
+// Playback/Alarms check this before opening a new SDK session so a caller
+// racing a session-opening call against Close gets a clear error instead of
+// silently leaking a live SDK handle that Close's already-taken snapshot of
+// d.sessions will never see and tear down. This narrows but does not fully
+// close that race - the SDK call itself isn't made under d.mu (it can be
+// slow, and Close already stops everything track() knows about at the time
+// it runs), so a session that opens in the brief window between this check
+// and the SDK call succeeding can still outlive Close(); callers doing that
+// concurrently should serialize with their own Close call instead of
+// relying on this as the only guard.
+func (d *Device) checkOpen(op string) error {
+	d.mu.Lock()
+	closed := d.closed
+	d.mu.Unlock()
+	if closed {
+		return fmt.Errorf("hikvision: %s: device is closed", op)
+	}
+	return nil
+}
 
 func (d *Device) track(c io_Closer) {
 	d.mu.Lock()
@@ -124,23 +152,29 @@ func (d *Device) Close() error {
 		_ = c.Close()
 	}
 
-	var err error
-	if C.hik_logout(C.int32_t(d.userID)) != 0 {
-		err = lastError("Logout")
-	}
+	err := sdkCall0("Logout", func() C.int32_t {
+		return C.hik_logout(C.int32_t(d.userID))
+	})
 	releaseInit()
 	return err
 }
 
-func cSetString(dst *C.char, dstLen int, s string) {
+// cSetString copies s (plus a NUL terminator) into the dstLen-byte fixed C
+// buffer at dst, reporting fit=false instead of silently truncating when s
+// doesn't leave room for the terminator - a truncated Address/Username/
+// Password wouldn't just be "shortened," it would be a *different, wrong*
+// credential, which is far more confusing to debug as a login failure than
+// a clear "too long" error raised up front.
+func cSetString(dst *C.char, dstLen int, s string) (fit bool) {
 	if len(s) >= dstLen {
-		s = s[:dstLen-1]
+		return false
 	}
 	cs := C.CString(s)
 	defer C.free(unsafe.Pointer(cs))
 	src := unsafe.Slice((*byte)(unsafe.Pointer(cs)), len(s)+1)
 	out := unsafe.Slice((*byte)(unsafe.Pointer(dst)), dstLen)
 	copy(out, src)
+	return true
 }
 
 func deviceInfoFromC(in *C.hik_device_info) DeviceInfo {

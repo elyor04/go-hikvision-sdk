@@ -78,11 +78,13 @@ func (d *Device) ManualSnap(channel int32) (PlateEvent, error) {
 	sceneBuf := make([]byte, maxImage)
 	var sceneLen C.uint32_t
 
-	rc := C.hik_manual_snap(C.int32_t(d.userID), C.int32_t(channel), &out,
-		(*C.uint8_t)(unsafe.Pointer(&sceneBuf[0])), C.uint32_t(len(sceneBuf)), &sceneLen,
-		nil, 0, nil)
-	if rc != 0 {
-		return PlateEvent{}, lastError("ManualSnap")
+	err := sdkCall0("ManualSnap", func() C.int32_t {
+		return C.hik_manual_snap(C.int32_t(d.userID), C.int32_t(channel), &out,
+			(*C.uint8_t)(unsafe.Pointer(&sceneBuf[0])), C.uint32_t(len(sceneBuf)), &sceneLen,
+			nil, 0, nil)
+	})
+	if err != nil {
+		return PlateEvent{}, err
 	}
 	ev := plateEventFromC(&out)
 	if sceneLen > 0 {

@@ -5,7 +5,10 @@ package hikvision
 */
 import "C"
 
-import "fmt"
+import (
+	"fmt"
+	"runtime"
+)
 
 // Error wraps a failure from the underlying HCNetSDK. Code is the value
 // NET_DVR_GetLastError() returned immediately after the failing call - per
@@ -39,4 +42,49 @@ func ErrorMessage(code uint32) (string, bool) {
 // NET_DVR_GetLastError() for the code.
 func lastError(op string) error {
 	return &Error{Op: op, Code: uint32(C.hik_get_last_error())}
+}
+
+// HCNetSDK documents NET_DVR_GetLastError() as returning the *calling
+// thread's* last error, not a process-global one - callers are expected to
+// invoke it immediately after the failing call, on the same thread. Go does
+// not otherwise guarantee that two consecutive cgo calls made by the same
+// goroutine (the SDK call itself, and the immediately following
+// NET_DVR_GetLastError() inside lastError) run on the same OS thread -
+// nothing prevents the goroutine from being rescheduled onto a different M
+// between them. Without pinning, a concurrent SDK call from another
+// goroutine (landing on the thread Go happens to reschedule us onto) or a
+// genuine migration can substitute the wrong error code: a spurious
+// success/failure or a misattributed error, invisible to `go test -race`
+// since no Go memory is raced on - it's entirely inside the C library's own
+// thread-local state. sdkCall0/sdkCallHandle exist so every call site that
+// makes an SDK call and then conditionally calls lastError does both under
+// the same locked OS thread; use them (or bracket manually with
+// runtime.LockOSThread/UnlockOSThread) rather than calling lastError bare
+// after an arbitrary gap.
+
+// sdkCall0 runs fn - an HCNetSDK wrapper using the "0 on success" convention
+// - and, on failure, captures its error under the same locked OS thread as
+// the call itself so the error genuinely belongs to fn. See the comment
+// above lastError.
+func sdkCall0(op string, fn func() C.int32_t) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if fn() != 0 {
+		return lastError(op)
+	}
+	return nil
+}
+
+// sdkCallHandle runs fn - an HCNetSDK wrapper returning a handle/ID
+// (negative on failure) - and, on failure, captures its error under the
+// same locked OS thread as the call itself. See the comment above
+// lastError.
+func sdkCallHandle(op string, fn func() C.int32_t) (int32, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	h := int32(fn())
+	if h < 0 {
+		return h, lastError(op)
+	}
+	return h, nil
 }

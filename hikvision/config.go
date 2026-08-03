@@ -6,7 +6,10 @@ package hikvision
 */
 import "C"
 
-import "unsafe"
+import (
+	"fmt"
+	"unsafe"
+)
 
 // STDXMLConfig calls HCNetSDK's generic ISAPI-style configuration passthrough
 // (NET_DVR_STDXMLConfig). url is an ISAPI method+path such as
@@ -31,10 +34,12 @@ func (d *Device) STDXMLConfig(url string, body []byte) ([]byte, error) {
 	out := make([]byte, maxResponse)
 	var outLen C.uint32_t
 
-	rc := C.hik_stdxml_config(C.int32_t(d.userID), cURL, inPtr, C.uint32_t(len(body)),
-		(*C.uint8_t)(unsafe.Pointer(&out[0])), C.uint32_t(len(out)), &outLen)
-	if rc != 0 {
-		return nil, lastError("STDXMLConfig")
+	err := sdkCall0("STDXMLConfig", func() C.int32_t {
+		return C.hik_stdxml_config(C.int32_t(d.userID), cURL, inPtr, C.uint32_t(len(body)),
+			(*C.uint8_t)(unsafe.Pointer(&out[0])), C.uint32_t(len(out)), &outLen)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out[:outLen], nil
 }
@@ -46,12 +51,17 @@ func (d *Device) STDXMLConfig(url string, body []byte) ([]byte, error) {
 // knowing and decoding the exact struct layout HCNetSDK.h documents for
 // command.
 func (d *Device) GetConfig(command uint32, channel int32, maxSize int) ([]byte, error) {
+	if maxSize <= 0 {
+		return nil, fmt.Errorf("hikvision: GetConfig: maxSize must be positive, got %d", maxSize)
+	}
 	buf := make([]byte, maxSize)
 	var outLen C.uint32_t
-	rc := C.hik_get_dvr_config(C.int32_t(d.userID), C.uint32_t(command), C.int32_t(channel),
-		(*C.uint8_t)(unsafe.Pointer(&buf[0])), C.uint32_t(len(buf)), &outLen)
-	if rc != 0 {
-		return nil, lastError("GetDVRConfig")
+	err := sdkCall0("GetDVRConfig", func() C.int32_t {
+		return C.hik_get_dvr_config(C.int32_t(d.userID), C.uint32_t(command), C.int32_t(channel),
+			(*C.uint8_t)(unsafe.Pointer(&buf[0])), C.uint32_t(len(buf)), &outLen)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return buf[:outLen], nil
 }
@@ -62,8 +72,11 @@ func (d *Device) SetConfig(command uint32, channel int32, data []byte) error {
 	if len(data) > 0 {
 		inPtr = (*C.uint8_t)(unsafe.Pointer(&data[0]))
 	}
-	if C.hik_set_dvr_config(C.int32_t(d.userID), C.uint32_t(command), C.int32_t(channel), inPtr, C.uint32_t(len(data))) != 0 {
-		return lastError("SetDVRConfig")
+	err := sdkCall0("SetDVRConfig", func() C.int32_t {
+		return C.hik_set_dvr_config(C.int32_t(d.userID), C.uint32_t(command), C.int32_t(channel), inPtr, C.uint32_t(len(data)))
+	})
+	if err != nil {
+		return err
 	}
 	return nil
 }

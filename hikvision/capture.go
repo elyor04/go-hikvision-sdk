@@ -28,10 +28,12 @@ func (d *Device) CaptureJPEG(channel int32, quality JPEGQuality) ([]byte, error)
 	buf := make([]byte, maxJPEGSize)
 
 	var written C.uint32_t
-	rc := C.hik_capture_jpeg(C.int32_t(d.userID), C.int32_t(channel), C.uint16_t(PicSizeAuto), C.uint16_t(quality),
-		(*C.uint8_t)(unsafe.Pointer(&buf[0])), C.uint32_t(len(buf)), &written)
-	if rc != 0 {
-		return nil, lastError("CaptureJPEGPicture")
+	err := sdkCall0("CaptureJPEGPicture", func() C.int32_t {
+		return C.hik_capture_jpeg(C.int32_t(d.userID), C.int32_t(channel), C.uint16_t(PicSizeAuto), C.uint16_t(quality),
+			(*C.uint8_t)(unsafe.Pointer(&buf[0])), C.uint32_t(len(buf)), &written)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return buf[:written], nil
 }

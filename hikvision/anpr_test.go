@@ -1,6 +1,9 @@
 package hikvision
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestPlateEventFromC(t *testing.T) {
 	ev := testBuildPlateEvent(testPlateEventInput{
@@ -28,6 +31,48 @@ func TestPlateEventFromC(t *testing.T) {
 	}
 	if ev.SceneImage != nil {
 		t.Errorf("expected nil SceneImage when scene_image pointer is NULL, got %d bytes", len(ev.SceneImage))
+	}
+}
+
+// TestPlateEventFromCTimezone verifies that a device-reported UTC offset
+// (cTimeDifferenceH/M via byISO8601) is honored so the resulting time.Time
+// represents the correct absolute instant, rather than mislabeling the
+// device's local wall-clock reading as UTC (the bug this guards against:
+// a device in UTC+5 reporting 22:04:16 must not be read as 22:04:16Z, which
+// would shift it 5 hours into the wrong day for any UTC/local consumer).
+func TestPlateEventFromCTimezone(t *testing.T) {
+	ev := testBuildPlateEvent(testPlateEventInput{
+		License: "TZ0001",
+		Year:    2026, Month: 8, Day: 3,
+		Hour: 22, Minute: 4, Second: 16,
+		TZValid: true, TZOffsetHour: 5, TZOffsetMin: 0,
+	})
+
+	wantUTC := time.Date(2026, 8, 3, 17, 4, 16, 0, time.UTC)
+	if !ev.CaptureTime.Equal(wantUTC) {
+		t.Errorf("CaptureTime = %v (UTC %v), want instant %v", ev.CaptureTime, ev.CaptureTime.UTC(), wantUTC)
+	}
+	if _, offset := ev.CaptureTime.Zone(); offset != 5*3600 {
+		t.Errorf("zone offset = %d seconds, want %d", offset, 5*3600)
+	}
+}
+
+// TestPlateEventFromCNoTimezone verifies that when the device does not
+// report a UTC offset (byISO8601/byLocalOrUTC = 0), the wall-clock reading
+// is preserved verbatim in the process's local zone rather than being
+// mislabeled UTC.
+func TestPlateEventFromCNoTimezone(t *testing.T) {
+	ev := testBuildPlateEvent(testPlateEventInput{
+		License: "TZ0002",
+		Year:    2026, Month: 8, Day: 3,
+		Hour: 22, Minute: 4, Second: 16,
+	})
+
+	if ev.CaptureTime.Location() != time.Local {
+		t.Errorf("Location = %v, want time.Local", ev.CaptureTime.Location())
+	}
+	if ev.CaptureTime.Hour() != 22 || ev.CaptureTime.Minute() != 4 || ev.CaptureTime.Second() != 16 {
+		t.Errorf("wall clock = %v, want 22:04:16 preserved verbatim", ev.CaptureTime)
 	}
 }
 

@@ -44,17 +44,15 @@ func (d *Device) PTZControl(channel int32, cmd PTZCommand, stop bool, speed uint
 	if stop {
 		stopArg = 1
 	}
-	if C.hik_ptz_control(C.int32_t(d.userID), C.int32_t(channel), C.uint32_t(cmd), C.uint32_t(stopArg), C.uint32_t(speed)) != 0 {
-		return lastError("PTZControlWithSpeed")
-	}
-	return nil
+	return sdkCall0("PTZControlWithSpeed", func() C.int32_t {
+		return C.hik_ptz_control(C.int32_t(d.userID), C.int32_t(channel), C.uint32_t(cmd), C.uint32_t(stopArg), C.uint32_t(speed))
+	})
 }
 
 // PTZPreset issues a preset command (set/clear/goto) for the given 1-based
 // preset index on channel.
 func (d *Device) PTZPreset(channel int32, cmd PTZPresetCommand, presetIndex uint32) error {
-	if C.hik_ptz_preset(C.int32_t(d.userID), C.int32_t(channel), C.uint32_t(cmd), C.uint32_t(presetIndex)) != 0 {
-		return lastError("PTZPreset")
-	}
-	return nil
+	return sdkCall0("PTZPreset", func() C.int32_t {
+		return C.hik_ptz_preset(C.int32_t(d.userID), C.int32_t(channel), C.uint32_t(cmd), C.uint32_t(presetIndex))
+	})
 }

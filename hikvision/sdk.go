@@ -70,12 +70,19 @@ type Config struct {
 	LogLevel LogLevel
 }
 
+// sdkMu guards initCount/appliedCfg/configured together. Configure and
+// ensureInit both need to read/write init state and config state in the
+// same call (Configure checks initCount to decide whether to hot-apply;
+// ensureInit reads appliedCfg/configured to decide what to init with) - two
+// separate locks taken in opposite orders by these two functions previously
+// caused a genuine AB-BA deadlock under concurrent Configure()/Login() calls
+// (reproduced via TestConfigureEnsureInitConcurrent hanging under -race).
+// A single mutex makes that class of bug structurally impossible here.
 var (
-	initMu       sync.Mutex
-	initCount    int
-	appliedCfg   Config
-	configured   bool
-	configuredMu sync.Mutex
+	sdkMu      sync.Mutex
+	initCount  int
+	appliedCfg Config
+	configured bool
 )
 
 // Configure applies process-wide SDK settings. Optional: if never called,
@@ -84,13 +91,10 @@ var (
 // returns an error for settings that HCNetSDK only accepts pre-Init
 // (ComponentPath); timeouts/reconnect/logging can be changed at any time.
 func Configure(cfg Config) error {
-	configuredMu.Lock()
-	defer configuredMu.Unlock()
+	sdkMu.Lock()
+	defer sdkMu.Unlock()
 
-	initMu.Lock()
 	alreadyInit := initCount > 0
-	initMu.Unlock()
-
 	if alreadyInit && cfg.ComponentPath != appliedCfg.ComponentPath {
 		return fmt.Errorf("hikvision: Configure: ComponentPath must be set before the first Device login")
 	}
@@ -98,20 +102,18 @@ func Configure(cfg Config) error {
 	configured = true
 
 	if alreadyInit {
-		return applyRuntimeConfig(cfg)
+		return applyRuntimeConfig(cfg, true)
 	}
 	return nil
 }
 
 func ensureInit() error {
-	initMu.Lock()
-	defer initMu.Unlock()
+	sdkMu.Lock()
+	defer sdkMu.Unlock()
 
 	if initCount == 0 {
-		configuredMu.Lock()
 		cfg := appliedCfg
 		wasConfigured := configured
-		configuredMu.Unlock()
 		if !wasConfigured {
 			cfg = Config{}
 		}
@@ -126,11 +128,11 @@ func ensureInit() error {
 			C.free(unsafe.Pointer(cPath))
 		}
 
-		if C.hik_init() != 0 {
-			return lastError("Init")
+		if err := sdkCall0("Init", func() C.int32_t { return C.hik_init() }); err != nil {
+			return err
 		}
 
-		if err := applyRuntimeConfig(cfg); err != nil {
+		if err := applyRuntimeConfig(cfg, wasConfigured); err != nil {
 			C.hik_cleanup()
 			return err
 		}
@@ -139,7 +141,11 @@ func ensureInit() error {
 	return nil
 }
 
-func applyRuntimeConfig(cfg Config) error {
+// wasConfigured is the value of the package-level `configured` global,
+// captured by the caller under sdkMu - applyRuntimeConfig itself must not
+// touch package-level mutable state, since both call sites invoke it while
+// already holding sdkMu (taking it again here would deadlock).
+func applyRuntimeConfig(cfg Config, wasConfigured bool) error {
 	waitMS := uint32(cfg.ConnectTimeout / time.Millisecond)
 	if waitMS == 0 {
 		waitMS = 3000
@@ -148,8 +154,10 @@ func applyRuntimeConfig(cfg Config) error {
 	if tries == 0 {
 		tries = 3
 	}
-	if C.hik_set_connect_time(C.uint32_t(waitMS), C.uint32_t(tries)) != 0 {
-		return lastError("SetConnectTime")
+	if err := sdkCall0("SetConnectTime", func() C.int32_t {
+		return C.hik_set_connect_time(C.uint32_t(waitMS), C.uint32_t(tries))
+	}); err != nil {
+		return err
 	}
 
 	interval := uint32(cfg.ReconnectInterval / time.Millisecond)
@@ -157,30 +165,34 @@ func applyRuntimeConfig(cfg Config) error {
 		interval = 30000
 	}
 	auto := cfg.AutoReconnect
-	if !configured {
+	if !wasConfigured {
 		auto = true // default on when Configure was never called
 	}
 	autoInt := int32(0)
 	if auto {
 		autoInt = 1
 	}
-	if C.hik_set_reconnect(C.uint32_t(interval), C.int32_t(autoInt)) != 0 {
-		return lastError("SetReconnect")
+	if err := sdkCall0("SetReconnect", func() C.int32_t {
+		return C.hik_set_reconnect(C.uint32_t(interval), C.int32_t(autoInt))
+	}); err != nil {
+		return err
 	}
 
 	if cfg.LogDir != "" {
 		cDir := C.CString(cfg.LogDir)
 		defer C.free(unsafe.Pointer(cDir))
-		if C.hik_set_log_to_file(C.int32_t(cfg.LogLevel), cDir, 1) != 0 {
-			return lastError("SetLogToFile")
+		if err := sdkCall0("SetLogToFile", func() C.int32_t {
+			return C.hik_set_log_to_file(C.int32_t(cfg.LogLevel), cDir, 1)
+		}); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 func releaseInit() {
-	initMu.Lock()
-	defer initMu.Unlock()
+	sdkMu.Lock()
+	defer sdkMu.Unlock()
 	initCount--
 	if initCount == 0 {
 		C.hik_cleanup()

@@ -31,3 +31,31 @@ func TestCStringTruncatesToBufferSize(t *testing.T) {
 		t.Errorf("got %q, want %q", got, "hello")
 	}
 }
+
+func TestCSetStringFits(t *testing.T) {
+	got, fit := testCSetString("hello", 16)
+	if !fit || got != "hello" {
+		t.Errorf("got %q, fit=%v, want %q, fit=true", got, fit, "hello")
+	}
+}
+
+func TestCSetStringExactFit(t *testing.T) {
+	// "hello" is 5 bytes; +1 for the NUL terminator is exactly bufLen.
+	got, fit := testCSetString("hello", 6)
+	if !fit || got != "hello" {
+		t.Errorf("got %q, fit=%v, want %q, fit=true", got, fit, "hello")
+	}
+}
+
+func TestCSetStringTooLongReportsNoFit(t *testing.T) {
+	// cSetString must report fit=false rather than silently truncating -
+	// Login relies on this to reject an over-length credential instead of
+	// authenticating with a different, wrong (truncated) one.
+	got, fit := testCSetString("hello world", 6)
+	if fit {
+		t.Errorf("fit = true, want false (%q + NUL doesn't fit in %d bytes)", "hello world", 6)
+	}
+	if got != "" {
+		t.Errorf("got %q, want empty (buffer must be left untouched on no-fit)", got)
+	}
+}

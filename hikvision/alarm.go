@@ -63,8 +63,19 @@ type Event struct {
 	Plate *PlateEvent
 }
 
+// alarmMu is a RWMutex, not a plain Mutex, specifically so dispatchAlarm can
+// hold it across both the map lookup AND the subsequent send (RLock, shared
+// among concurrent dispatches) while a session's Close closes the channel
+// under the exclusive Lock. A plain Mutex only guarding the lookup left a
+// window where dispatchAlarm had already fetched the channel but not yet
+// sent to it when Close deleted the map entry and closed that same channel -
+// an unconditional "send on closed channel" panic once that ordering
+// occurred (reproduced by TestDispatchAlarmCloseNoSendOnClosedChannel).
+// Holding RLock for the whole lookup+send means Close's exclusive Lock
+// cannot proceed until any in-flight send has completed, and any dispatch
+// that acquires RLock after Close's Lock will simply find the entry gone.
 var (
-	alarmMu       sync.Mutex
+	alarmMu       sync.RWMutex
 	alarmOnce     sync.Once
 	alarmSubs     = map[int32]chan Event{}
 	exceptionMu   sync.Mutex
@@ -77,9 +88,9 @@ func dispatchAlarm(ev Event) {
 	if !ev.Alarmer.UserIDValid {
 		return
 	}
-	alarmMu.Lock()
+	alarmMu.RLock()
+	defer alarmMu.RUnlock()
 	ch, ok := alarmSubs[ev.Alarmer.UserID]
-	alarmMu.Unlock()
 	if !ok {
 		return
 	}
@@ -111,9 +122,9 @@ func OnException(f func(t ExceptionType, userID, handle int32)) error {
 		if exceptionErr = ensureInit(); exceptionErr != nil {
 			return
 		}
-		if C.hik_set_exception_callback() != 0 {
-			exceptionErr = lastError("SetExceptionCallBack")
-		}
+		exceptionErr = sdkCall0("SetExceptionCallBack", func() C.int32_t {
+			return C.hik_set_exception_callback()
+		})
 	})
 	if exceptionErr != nil {
 		return exceptionErr
@@ -142,16 +153,16 @@ func (s *alarmChanSession) Close() error {
 	}
 	s.closed = true
 
+	// delete-then-close must happen atomically under the exclusive lock -
+	// see the comment on alarmMu.
 	alarmMu.Lock()
 	delete(alarmSubs, s.userID)
+	close(s.events)
 	alarmMu.Unlock()
 
-	var err error
-	if C.hik_alarm_chan_close(C.int32_t(s.alarmH)) != 0 {
-		err = lastError("CloseAlarmChan")
-	}
-	close(s.events)
-	return err
+	return sdkCall0("CloseAlarmChan", func() C.int32_t {
+		return C.hik_alarm_chan_close(C.int32_t(s.alarmH))
+	})
 }
 
 // Alarms opens an alarm subscription for this device (NET_DVR_SetupAlarmChan_V41)
@@ -159,6 +170,9 @@ func (s *alarmChanSession) Close() error {
 // cancelled or the Device is closed. HCNetSDK's message callback is
 // process-wide and registered lazily on first use across the whole package.
 func (d *Device) Alarms(ctx context.Context) (<-chan Event, error) {
+	if err := d.checkOpen("Alarms"); err != nil {
+		return nil, err
+	}
 	var setupErr error
 	alarmOnce.Do(func() {
 		setupErr = C_setAlarmCallback()
@@ -167,9 +181,11 @@ func (d *Device) Alarms(ctx context.Context) (<-chan Event, error) {
 		return nil, setupErr
 	}
 
-	alarmH := int32(C.hik_alarm_chan_open(C.int32_t(d.userID)))
-	if alarmH < 0 {
-		return nil, lastError("SetupAlarmChan")
+	alarmH, err := sdkCallHandle("SetupAlarmChan", func() C.int32_t {
+		return C.hik_alarm_chan_open(C.int32_t(d.userID))
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	sess := &alarmChanSession{userID: d.userID, alarmH: alarmH, events: make(chan Event, 32)}
@@ -191,8 +207,7 @@ func (d *Device) Alarms(ctx context.Context) (<-chan Event, error) {
 // C_setAlarmCallback registers HCNetSDK's single process-wide message
 // callback. Split out from Alarms so alarmOnce.Do has a plain func() error.
 func C_setAlarmCallback() error {
-	if C.hik_set_alarm_callback() != 0 {
-		return lastError("SetDVRMessageCallBack")
-	}
-	return nil
+	return sdkCall0("SetDVRMessageCallBack", func() C.int32_t {
+		return C.hik_set_alarm_callback()
+	})
 }

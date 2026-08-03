@@ -193,6 +193,40 @@ $env:HIK_HOST="192.168.1.64"; $env:HIK_USER="admin"; $env:HIK_PASS="..."
 go run ./examples/login-and-snapshot
 ```
 
+## Time handling
+
+Every `hik_time` value crossing the cgo boundary is the device's own
+**local wall-clock reading**, not UTC — this is how HCNetSDK's find/
+playback/download commands and its ANPR capture-time field all work:
+
+- **Reading** (`PlateEvent.CaptureTime`, `Recording.Start`/`Stop`): if the
+  device reported a UTC offset alongside the timestamp (most ANPR/ITS
+  events do), it's decoded into the correct absolute instant using that
+  offset. If it didn't, the wall-clock reading is kept as-is in the
+  process's own local zone (`time.Local`) rather than being mislabeled
+  UTC.
+- **Writing** (`FindRecordings`/`Playback`/`Download`'s `start`/`stop`
+  params): only the wall-clock components (Y/M/D h:m:s) of whatever
+  `time.Time` you pass are sent, in whatever `Location` it's already in —
+  pass a time already expressed in the device's local zone (e.g. one this
+  package handed back to you, or a literal reading of that site's clock).
+
+Don't reach for `.UTC()` on these expecting a "just works" conversion in
+either direction — the device doesn't natively deal in UTC, it deals in
+its own configured local time. Getting this wrong looks exactly like a
+several-hour/next-day-rollover bug in whatever displays the result.
+
+## Concurrency
+
+`Device` methods, `Alarms`/`RealPlay`/`Playback` streams, and the
+process-wide `Configure`/`OnException` calls are all safe to use from
+multiple goroutines concurrently. Internally, every SDK call that can
+fail retrieves `NET_DVR_GetLastError()` on the same OS thread as the call
+itself (via `runtime.LockOSThread`) — HCNetSDK documents that function as
+returning the *calling thread's* last error, which Go does not otherwise
+guarantee stays consistent across two separate cgo calls from the same
+goroutine.
+
 ## ANPR / license-plate recognition
 
 ```go
@@ -216,11 +250,18 @@ exact struct/JSON shape.
 
 ## Testing
 
-`go test ./...` runs the package's unit tests — pure decode/formatting logic
-exercised through synthetic C structs (`hikvision/cgo_test_support.go`; Go's
-`_test.go` files cannot themselves use `import "C"`, so the small amount of
-cgo-touching test scaffolding lives in a regular, unexported-only source
-file instead). No live device is required or contacted by `go test`.
+`go test ./...` runs the package's unit tests. Most exercise pure decode/
+formatting logic through synthetic C structs (`hikvision/cgo_test_support.go`;
+Go's `_test.go` files cannot themselves use `import "C"`, so the small amount
+of cgo-touching test scaffolding lives in a regular, unexported-only source
+file instead). A few (`sdk_test.go`, `alarm_test.go`, `preview_test.go`) are
+concurrency regression tests instead — a couple of them run real (but
+network-free) `NET_DVR_Init`/`Cleanup` cycles to exercise the process-wide
+init/`Configure` locking under load. **Always run with `-race`**: it's how
+several real bugs in this package (an `Init`/`Configure` deadlock, a data
+race, and a `send on closed channel` panic in the alarm/stream-close path)
+were originally caught. No live device or network connection is required or
+contacted by `go test` either way.
 
 On Windows, the vendor DLL directory needs to be on `PATH` for the test
 binary to load HCNetSDK (same requirement as running any built binary — see
@@ -228,7 +269,7 @@ above):
 
 ```powershell
 $env:PATH = "$PWD\internal\sdklib\windows_amd64\lib;$env:PATH"
-go test ./...
+go test ./... -race
 ```
 
 ## Package layout

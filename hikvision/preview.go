@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"runtime/cgo"
 	"sync"
+	"sync/atomic"
 )
 
 // StreamDataType identifies the kind of buffer delivered on a Frame -
@@ -60,13 +61,37 @@ type previewSession struct {
 	closed  bool
 }
 
+// droppedFrames counts frames discarded because a previewSession's Frames()
+// channel was full - i.e. the consumer (the app's ffmpeg-feed goroutine)
+// wasn't draining fast enough. A nonzero/growing count while a stream is
+// active means something downstream is stalling and the SDK's realtime
+// callback thread is shedding load rather than blocking, which shows up as
+// visible artifacts/jumps in the remuxed output, not just delay.
+var droppedFrames atomic.Int64
+
+// DroppedFrameCount reports the cumulative number of frames dropped by
+// previewSession.deliver since process start (see droppedFrames).
+func DroppedFrameCount() int64 { return droppedFrames.Load() }
+
+// deliver and Close share closeMu so a frame delivered by the SDK's callback
+// thread concurrently with Close can never be sent on s.frames after Close
+// has closed it - closing a channel a concurrent, unsynchronized sender
+// might still write to is an unconditional "send on closed channel" panic,
+// not just a data race (see the identical, confirmed bug this mirrors in
+// alarm.go's dispatchAlarm/alarmChanSession.Close).
 func (s *previewSession) deliver(t StreamDataType, data []byte) {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if s.closed {
+		return
+	}
 	select {
 	case s.frames <- Frame{Type: t, Data: data}:
 	default:
 		// Consumer isn't keeping up - drop the frame rather than blocking
 		// the SDK's internal delivery thread (which would eventually stall
 		// the whole connection).
+		droppedFrames.Add(1)
 	}
 }
 
@@ -77,10 +102,9 @@ func (s *previewSession) Close() error {
 		return nil
 	}
 	s.closed = true
-	var err error
-	if C.hik_realplay_stop(C.int32_t(s.realH)) != 0 {
-		err = lastError("StopRealPlay")
-	}
+	err := sdkCall0("StopRealPlay", func() C.int32_t {
+		return C.hik_realplay_stop(C.int32_t(s.realH))
+	})
 	s.handle.Delete()
 	close(s.frames)
 	return err
@@ -95,14 +119,19 @@ func (s *previewSession) Close() error {
 // as HCNetSDK/the device produced them (typically H.264/H.265 elementary
 // stream data); pipe them into ffmpeg, gocv, or any decoder of your choice.
 func (d *Device) RealPlay(ctx context.Context, channel int32, stream StreamType) (*Stream, error) {
+	if err := d.checkOpen("RealPlay"); err != nil {
+		return nil, err
+	}
 	sess := &previewSession{frames: make(chan Frame, 64)}
 	sess.handle = cgo.NewHandle(sess)
 
-	realH := int32(C.hik_realplay_start(C.int32_t(d.userID), C.int32_t(channel), C.uint32_t(stream),
-		C.uintptr_t(sess.handle)))
-	if realH < 0 {
+	realH, err := sdkCallHandle("RealPlay", func() C.int32_t {
+		return C.hik_realplay_start(C.int32_t(d.userID), C.int32_t(channel), C.uint32_t(stream),
+			C.uintptr_t(sess.handle))
+	})
+	if err != nil {
 		sess.handle.Delete()
-		return nil, lastError("RealPlay")
+		return nil, err
 	}
 	sess.realH = realH
 

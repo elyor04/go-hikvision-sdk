@@ -112,9 +112,20 @@ int32_t hik_capture_jpeg(int32_t user_id, int32_t channel, uint16_t pic_size,
 
 /* ================================ playback ================================ */
 
+/* year/month/day/hour/minute/second are the device's wall-clock reading -
+ * NOT necessarily UTC. tz_valid/tz_offset_hour/tz_offset_min mirror the SDK's
+ * cTimeDifferenceH/cTimeDifferenceM/byISO8601(or byLocalOrUTC) fields, which
+ * (when tz_valid is non-zero) give the UTC offset that wall-clock reading is
+ * in: UTC = wall-clock - (tz_offset_hour hours + tz_offset_min minutes).
+ * tz_valid is 0 for hik_time values built on the Go side to send to the SDK
+ * (start/stop query bounds), since those commands take device-local time
+ * with no accompanying offset. */
 typedef struct {
     uint16_t year;
     uint8_t month, day, hour, minute, second;
+    int8_t tz_offset_hour;
+    int8_t tz_offset_min;
+    uint8_t tz_valid;
 } hik_time;
 
 int32_t hik_find_file_open(int32_t user_id, int32_t channel, hik_time start, hik_time stop);

@@ -5,7 +5,10 @@ package hikvision
 */
 import "C"
 
-import "unsafe"
+import (
+	"time"
+	"unsafe"
+)
 
 // This file exists solely to give the test suite (errors_test.go, util_test.go,
 // anpr_test.go, ...) a way to exercise cgo-boundary code (cString,
@@ -52,6 +55,9 @@ type testPlateEventInput struct {
 	Year                 uint16
 	Month, Day           uint8
 	Hour, Minute, Second uint8
+	TZValid              bool
+	TZOffsetHour         int8
+	TZOffsetMin          int8
 	SceneImage           []byte
 	PlateImage           []byte
 }
@@ -67,9 +73,14 @@ func testBuildPlateEvent(in testPlateEventInput) PlateEvent {
 	p.vehicle_color = C.uint8_t(in.VehicleColor)
 	p.vehicle_type = C.uint8_t(in.VehicleType)
 	p.speed_kmh = C.uint16_t(in.SpeedKMH)
+	var tzValid C.uint8_t
+	if in.TZValid {
+		tzValid = 1
+	}
 	p.capture_time = C.hik_time{
 		year: C.uint16_t(in.Year), month: C.uint8_t(in.Month), day: C.uint8_t(in.Day),
 		hour: C.uint8_t(in.Hour), minute: C.uint8_t(in.Minute), second: C.uint8_t(in.Second),
+		tz_offset_hour: C.int8_t(in.TZOffsetHour), tz_offset_min: C.int8_t(in.TZOffsetMin), tz_valid: tzValid,
 	}
 	if len(in.SceneImage) > 0 {
 		p.scene_image = (*C.uint8_t)(unsafe.Pointer(&in.SceneImage[0]))
@@ -80,4 +91,29 @@ func testBuildPlateEvent(in testPlateEventInput) PlateEvent {
 		p.plate_image_len = C.uint32_t(len(in.PlateImage))
 	}
 	return plateEventFromC(&p)
+}
+
+// testCSetString exercises cSetString's real encode path, round-tripping
+// through cString to observe what actually landed in the buffer.
+func testCSetString(s string, bufLen int) (result string, fit bool) {
+	buf := make([]C.char, bufLen)
+	fit = cSetString(&buf[0], bufLen, s)
+	return cString(&buf[0], len(buf)), fit
+}
+
+// testHikTimeResult is hikTime's C.hik_time output decoded into plain Go
+// fields, so tests can inspect it without themselves using cgo.
+type testHikTimeResult struct {
+	Year                 uint16
+	Month, Day           uint8
+	Hour, Minute, Second uint8
+}
+
+// testHikTime exercises the real hikTime encode path.
+func testHikTime(t time.Time) testHikTimeResult {
+	h := hikTime(t)
+	return testHikTimeResult{
+		Year: uint16(h.year), Month: uint8(h.month), Day: uint8(h.day),
+		Hour: uint8(h.hour), Minute: uint8(h.minute), Second: uint8(h.second),
+	}
 }

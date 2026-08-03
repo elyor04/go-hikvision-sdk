@@ -36,6 +36,9 @@ void copy_time_search_out(const NET_DVR_TIME_SEARCH &in, hik_time &out) {
     out.hour = in.byHour;
     out.minute = in.byMinute;
     out.second = in.bySecond;
+    out.tz_offset_hour = in.cTimeDifferenceH;
+    out.tz_offset_min = in.cTimeDifferenceM;
+    out.tz_valid = in.byLocalOrUTC;
 }
 
 void fill_alarmer(const NET_DVR_ALARMER *in, hik_alarmer &out) {
