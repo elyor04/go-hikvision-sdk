@@ -171,6 +171,11 @@ type playbackSession struct {
 	frames  chan Frame
 	closeMu sync.Mutex
 	closed  bool
+	// done is closed exactly once, by Close, regardless of which caller
+	// triggered it - see the identical field on previewSession in preview.go
+	// for why (lets the ctx-watcher goroutine in Playback exit promptly
+	// instead of leaking until/unless ctx is ever cancelled).
+	done chan struct{}
 }
 
 // deliver and Close share closeMu - see the identical comment on
@@ -196,6 +201,7 @@ func (s *playbackSession) Close() error {
 		return nil
 	}
 	s.closed = true
+	close(s.done)
 	err := sdkCall0("StopPlayBack", func() C.int32_t {
 		return C.hik_playback_stop(C.int32_t(s.playH))
 	})
@@ -212,7 +218,7 @@ func (d *Device) Playback(ctx context.Context, channel int32, start, stop time.T
 	if err := d.checkOpen("Playback"); err != nil {
 		return nil, nil, err
 	}
-	sess := &playbackSession{frames: make(chan Frame, 64)}
+	sess := &playbackSession{frames: make(chan Frame, 64), done: make(chan struct{})}
 	sess.handle = cgo.NewHandle(sess)
 
 	playH, err := sdkCallHandle("PlayBackByTime", func() C.int32_t {
@@ -229,8 +235,11 @@ func (d *Device) Playback(ctx context.Context, channel int32, start, stop time.T
 	s := &Stream{sess: sess, device: d}
 	if ctx != nil {
 		go func() {
-			<-ctx.Done()
-			_ = s.Close()
+			select {
+			case <-ctx.Done():
+				_ = s.Close()
+			case <-sess.done:
+			}
 		}()
 	}
 	return s, &PlaybackSession{playH: playH}, nil

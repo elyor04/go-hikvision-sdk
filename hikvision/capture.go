@@ -35,5 +35,9 @@ func (d *Device) CaptureJPEG(channel int32, quality JPEGQuality) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	return buf[:written], nil
+	// Copy into a right-sized slice rather than returning buf[:written] -
+	// otherwise the returned slice would keep the whole maxJPEGSize backing
+	// array (typically many times larger than the actual JPEG) alive for as
+	// long as the caller holds onto it.
+	return append([]byte(nil), buf[:written]...), nil
 }

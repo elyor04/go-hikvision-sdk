@@ -59,6 +59,13 @@ type previewSession struct {
 	frames  chan Frame
 	closeMu sync.Mutex
 	closed  bool
+	// done is closed exactly once, by Close, regardless of which caller
+	// triggered it (Stream.Close, Device.Close, or the ctx-watcher goroutine
+	// below) - it lets that watcher goroutine exit as soon as the session is
+	// closed by any other path instead of leaking until ctx is eventually
+	// cancelled (which, for a ctx that's never cancelled, e.g.
+	// context.Background(), would otherwise be never).
+	done chan struct{}
 }
 
 // droppedFrames counts frames discarded because a previewSession's Frames()
@@ -102,6 +109,7 @@ func (s *previewSession) Close() error {
 		return nil
 	}
 	s.closed = true
+	close(s.done)
 	err := sdkCall0("StopRealPlay", func() C.int32_t {
 		return C.hik_realplay_stop(C.int32_t(s.realH))
 	})
@@ -122,7 +130,7 @@ func (d *Device) RealPlay(ctx context.Context, channel int32, stream StreamType)
 	if err := d.checkOpen("RealPlay"); err != nil {
 		return nil, err
 	}
-	sess := &previewSession{frames: make(chan Frame, 64)}
+	sess := &previewSession{frames: make(chan Frame, 64), done: make(chan struct{})}
 	sess.handle = cgo.NewHandle(sess)
 
 	realH, err := sdkCallHandle("RealPlay", func() C.int32_t {
@@ -139,8 +147,11 @@ func (d *Device) RealPlay(ctx context.Context, channel int32, stream StreamType)
 	s := &Stream{sess: sess, device: d}
 	if ctx != nil {
 		go func() {
-			<-ctx.Done()
-			_ = s.Close()
+			select {
+			case <-ctx.Done():
+				_ = s.Close()
+			case <-sess.done:
+			}
 		}()
 	}
 	return s, nil

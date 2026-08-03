@@ -143,6 +143,12 @@ type alarmChanSession struct {
 	events  chan Event
 	closeMu sync.Mutex
 	closed  bool
+	// done is closed exactly once, by Close, regardless of which caller
+	// triggered it - see the identical field on previewSession in preview.go
+	// for why (lets the ctx-watcher goroutine in Alarms exit promptly instead
+	// of leaking; this matters more here than for RealPlay/Playback since
+	// Device.Close is often the only other path that closes this session).
+	done chan struct{}
 }
 
 func (s *alarmChanSession) Close() error {
@@ -152,6 +158,7 @@ func (s *alarmChanSession) Close() error {
 		return nil
 	}
 	s.closed = true
+	close(s.done)
 
 	// delete-then-close must happen atomically under the exclusive lock -
 	// see the comment on alarmMu.
@@ -188,7 +195,7 @@ func (d *Device) Alarms(ctx context.Context) (<-chan Event, error) {
 		return nil, err
 	}
 
-	sess := &alarmChanSession{userID: d.userID, alarmH: alarmH, events: make(chan Event, 32)}
+	sess := &alarmChanSession{userID: d.userID, alarmH: alarmH, events: make(chan Event, 32), done: make(chan struct{})}
 	alarmMu.Lock()
 	alarmSubs[d.userID] = sess.events
 	alarmMu.Unlock()
@@ -196,9 +203,12 @@ func (d *Device) Alarms(ctx context.Context) (<-chan Event, error) {
 	d.track(sess)
 	if ctx != nil {
 		go func() {
-			<-ctx.Done()
-			d.untrack(sess)
-			_ = sess.Close()
+			select {
+			case <-ctx.Done():
+				d.untrack(sess)
+				_ = sess.Close()
+			case <-sess.done:
+			}
 		}()
 	}
 	return sess.events, nil

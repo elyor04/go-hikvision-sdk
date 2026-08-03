@@ -41,7 +41,11 @@ func (d *Device) STDXMLConfig(url string, body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return out[:outLen], nil
+	// Copy into a right-sized slice rather than returning out[:outLen] - the
+	// maxResponse buffer is typically far larger than a real response, and
+	// out[:outLen] would keep the whole 8 MiB backing array alive for as long
+	// as the caller holds the result.
+	return append([]byte(nil), out[:outLen]...), nil
 }
 
 // GetConfig is the escape hatch for HCNetSDK's legacy binary configuration
