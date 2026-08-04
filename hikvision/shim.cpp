@@ -61,8 +61,20 @@ void fill_plate_from_its(const NET_ITS_PLATE_RESULT *its, hik_plate_event &out) 
     out.confidence = its->struPlateInfo.byEntireBelieve;
     out.plate_color = its->struPlateInfo.byColor;
     out.vehicle_color = its->struVehicleInfo.byColor;
-    out.vehicle_type = its->struVehicleInfo.byVehicleType;
+    // its->byVehicleType (not struVehicleInfo.byVehicleType) is the field
+    // HCNetSDK.h documents as "refer to VTR_RESULT" - struVehicleInfo's is an
+    // undocumented, different/coarser scale (confirmed on real hardware: a
+    // car reported byVehicleType=3/VTR_RESULT_CAR at the top level but
+    // struVehicleInfo.byVehicleType=1/VTR_RESULT_BUS).
+    out.vehicle_type = its->byVehicleType;
     out.speed_kmh = its->struVehicleInfo.wSpeed;
+    out.direction = its->byDir;
+    out.country = its->struPlateInfo.byCountry;
+    out.lane = its->byDriveChan;
+    if (its->struPlateInfo.pXmlBuf && its->struPlateInfo.dwXmlLen) {
+        out.raw_xml = reinterpret_cast<const uint8_t *>(its->struPlateInfo.pXmlBuf);
+        out.raw_xml_len = its->struPlateInfo.dwXmlLen;
+    }
     copy_time_search_out(NET_DVR_TIME_SEARCH{
                               its->struSnapFirstPicTime.wYear, its->struSnapFirstPicTime.byMonth,
                               its->struSnapFirstPicTime.byDay, its->struSnapFirstPicTime.byHour,
@@ -92,11 +104,30 @@ void fill_plate_from_result(const NET_DVR_PLATE_RESULT *r, hik_plate_event &out)
     out.confidence = r->struPlateInfo.byEntireBelieve;
     out.plate_color = r->struPlateInfo.byColor;
     out.vehicle_color = r->struVehicleInfo.byColor;
-    out.vehicle_type = r->struVehicleInfo.byVehicleType;
+    // r->byVehicleType (not struVehicleInfo.byVehicleType) is the field
+    // HCNetSDK.h documents as "refer to VTR_RESULT" - see the identical
+    // comment in fill_plate_from_its, confirmed on real hardware.
+    out.vehicle_type = r->byVehicleType;
     out.speed_kmh = r->struVehicleInfo.wSpeed;
+    out.country = r->struPlateInfo.byCountry;
+    out.lane = r->byDriveChan;
+    // direction is left 0 - NET_DVR_PLATE_RESULT has no byDir field (that's
+    // only on the newer NET_ITS_PLATE_RESULT, see fill_plate_from_its).
+    if (r->struPlateInfo.pXmlBuf && r->struPlateInfo.dwXmlLen) {
+        out.raw_xml = reinterpret_cast<const uint8_t *>(r->struPlateInfo.pXmlBuf);
+        out.raw_xml_len = r->struPlateInfo.dwXmlLen;
+    }
     if (r->pBuffer2 && r->dwPicLen) {
         out.scene_image = r->pBuffer2;
         out.scene_image_len = r->dwPicLen;
+    }
+    // pBuffer2 holds the scene snapshot followed immediately by the license
+    // plate snapshot (see the comment after NET_DVR_PLATE_RESULT's definition
+    // in HCNetSDK.h) - the plate crop is the dwPicPlateLen bytes right after
+    // the scene image's dwPicLen bytes, not a separate buffer.
+    if (r->pBuffer2 && r->dwPicPlateLen) {
+        out.plate_image = r->pBuffer2 + r->dwPicLen;
+        out.plate_image_len = r->dwPicPlateLen;
     }
 }
 
@@ -365,10 +396,6 @@ int32_t hik_alarm_chan_close(int32_t alarm_handle) { return NET_DVR_CloseAlarmCh
 int32_t hik_manual_snap(int32_t user_id, int32_t channel, hik_plate_event *out,
                          uint8_t *scene_buf, uint32_t scene_buf_cap, uint32_t *scene_len,
                          uint8_t *plate_buf, uint32_t plate_buf_cap, uint32_t *plate_len) {
-    (void)plate_buf;
-    (void)plate_buf_cap;
-    if (plate_len) *plate_len = 0;
-
     NET_DVR_MANUALSNAP in;
     std::memset(&in, 0, sizeof(in));
     in.byChannel = static_cast<BYTE>(channel);
@@ -390,6 +417,13 @@ int32_t hik_manual_snap(int32_t user_id, int32_t channel, hik_plate_event *out,
         if (scene_len) *scene_len = n;
     } else if (scene_len) {
         *scene_len = 0;
+    }
+    if (plate_buf && result.pBuffer2 && result.dwPicPlateLen) {
+        DWORD n = result.dwPicPlateLen < plate_buf_cap ? result.dwPicPlateLen : plate_buf_cap;
+        std::memcpy(plate_buf, result.pBuffer2 + result.dwPicLen, n);
+        if (plate_len) *plate_len = n;
+    } else if (plate_len) {
+        *plate_len = 0;
     }
     return 0;
 }

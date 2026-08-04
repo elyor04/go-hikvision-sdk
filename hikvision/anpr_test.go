@@ -23,6 +23,15 @@ func TestPlateEventFromC(t *testing.T) {
 	if ev.Confidence != 92 {
 		t.Errorf("Confidence = %d, want 92", ev.Confidence)
 	}
+	if ev.PlateColor != PlateColorYellow {
+		t.Errorf("PlateColor = %d, want %d (PlateColorYellow)", ev.PlateColor, PlateColorYellow)
+	}
+	if ev.VehicleColor != VehicleColorSilver {
+		t.Errorf("VehicleColor = %d, want %d (VehicleColorSilver)", ev.VehicleColor, VehicleColorSilver)
+	}
+	if ev.VehicleType != VehicleCar {
+		t.Errorf("VehicleType = %d, want %d (VehicleCar)", ev.VehicleType, VehicleCar)
+	}
 	if ev.SpeedKMH != 65 {
 		t.Errorf("SpeedKMH = %d, want 65", ev.SpeedKMH)
 	}
@@ -96,5 +105,53 @@ func TestPlateEventFromCWithImages(t *testing.T) {
 	}
 	if len(ev.PlateImage) != len(plateData) {
 		t.Fatalf("PlateImage len = %d, want %d", len(ev.PlateImage), len(plateData))
+	}
+}
+
+// TestPlateEventFromCExtendedFields verifies the ITS-only fields (Direction,
+// Country, Lane, RawXML) decode correctly when the device reports them.
+func TestPlateEventFromCExtendedFields(t *testing.T) {
+	xml := []byte(`<?xml version="1.0"?><EventNotificationAlert><ANPR><country>33</country></ANPR></EventNotificationAlert>`)
+
+	ev := testBuildPlateEvent(testPlateEventInput{
+		License:   "DIR0001",
+		Direction: 2,
+		Country:   33,
+		Lane:      1,
+		RawXML:    xml,
+	})
+
+	if ev.Direction != DirectionDown {
+		t.Errorf("Direction = %d, want %d (DirectionDown)", ev.Direction, DirectionDown)
+	}
+	if ev.Country != 33 {
+		t.Errorf("Country = %d, want 33", ev.Country)
+	}
+	if ev.Lane != 1 {
+		t.Errorf("Lane = %d, want 1", ev.Lane)
+	}
+	if string(ev.RawXML) != string(xml) {
+		t.Errorf("RawXML = %q, want %q", ev.RawXML, xml)
+	}
+}
+
+// TestPlateEventFromCNoExtendedFields verifies the zero-value/absent case for
+// the ITS-only fields - e.g. the older COMM_UPLOAD_PLATE_RESULT/
+// COMM_PLATE_RESULT_V50 alarm formats and ManualSnap, which report no
+// direction and often no XML at all.
+func TestPlateEventFromCNoExtendedFields(t *testing.T) {
+	ev := testBuildPlateEvent(testPlateEventInput{License: "NOEXT01"})
+
+	if ev.Direction != DirectionUnknown {
+		t.Errorf("Direction = %d, want %d (DirectionUnknown)", ev.Direction, DirectionUnknown)
+	}
+	if ev.Country != 0 {
+		t.Errorf("Country = %d, want 0", ev.Country)
+	}
+	if ev.Lane != 0 {
+		t.Errorf("Lane = %d, want 0", ev.Lane)
+	}
+	if ev.RawXML != nil {
+		t.Errorf("expected nil RawXML when raw_xml pointer is NULL, got %d bytes", len(ev.RawXML))
 	}
 }

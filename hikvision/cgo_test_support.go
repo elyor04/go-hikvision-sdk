@@ -60,6 +60,10 @@ type testPlateEventInput struct {
 	TZOffsetMin          int8
 	SceneImage           []byte
 	PlateImage           []byte
+	Direction            uint8
+	Country              uint8
+	Lane                 uint8
+	RawXML               []byte
 }
 
 // testBuildPlateEvent constructs a C.hik_plate_event from in and decodes it
@@ -89,6 +93,13 @@ func testBuildPlateEvent(in testPlateEventInput) PlateEvent {
 	if len(in.PlateImage) > 0 {
 		p.plate_image = (*C.uint8_t)(unsafe.Pointer(&in.PlateImage[0]))
 		p.plate_image_len = C.uint32_t(len(in.PlateImage))
+	}
+	p.direction = C.uint8_t(in.Direction)
+	p.country = C.uint8_t(in.Country)
+	p.lane = C.uint8_t(in.Lane)
+	if len(in.RawXML) > 0 {
+		p.raw_xml = (*C.uint8_t)(unsafe.Pointer(&in.RawXML[0]))
+		p.raw_xml_len = C.uint32_t(len(in.RawXML))
 	}
 	return plateEventFromC(&p)
 }

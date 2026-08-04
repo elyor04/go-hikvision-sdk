@@ -188,6 +188,25 @@ typedef struct {
     uint32_t scene_image_len;
     const uint8_t *plate_image;
     uint32_t plate_image_len;
+    /* byDir: 1-Up,2-Down,3-Bi-directional,4-Westward,5-Northward,6-Eastward,
+     * 7-Southward,8-Other. Only carried by the newer ITS-format alarm
+     * (COMM_ITS_PLATE_RESULT); 0 for the older COMM_UPLOAD_PLATE_RESULT/
+     * COMM_PLATE_RESULT_V50 alarm formats and for ManualSnap, which have no
+     * direction field at all. */
+    uint8_t direction;
+    /* byCountry - see COUNTRY_INDEX in HCNetSDK.h for the code table. 0 if
+     * not reported. */
+    uint8_t country;
+    /* byDriveChan - 1-based traffic lane index. 0 if not reported. */
+    uint8_t lane;
+    /* Full ISAPI <EventNotificationAlert> XML document the device attached
+     * to this event, if any - carries many device/firmware-specific fields
+     * (safety-belt/phone-use/dangerous-goods detection, illegal-type
+     * descriptions, and more) this package doesn't mirror into typed fields.
+     * Pointer is only valid for the duration of the callback; Go must copy
+     * it immediately, same as scene_image/plate_image. NULL/0 if absent. */
+    const uint8_t *raw_xml;
+    uint32_t raw_xml_len;
 } hik_plate_event;
 
 /* Registers the single, process-wide alarm message callback

@@ -233,7 +233,7 @@ goroutine.
 plates, err := dev.PlateEvents(ctx)
 // ...
 for ev := range plates {
-    fmt.Println(ev.License, ev.Confidence, ev.SpeedKMH)
+    fmt.Println(ev.License, ev.Confidence, ev.SpeedKMH, ev.VehicleType, ev.Direction)
     // ev.SceneImage / ev.PlateImage are JPEG bytes, when present
 }
 ```
@@ -241,9 +241,23 @@ for ev := range plates {
 `PlateEvents` is a filtered view over `Device.Alarms`, decoding
 `COMM_ITS_PLATE_RESULT` / `COMM_UPLOAD_PLATE_RESULT` / `COMM_PLATE_RESULT_V50`
 events into `PlateEvent`. `Device.ManualSnap` triggers an immediate
-recognition instead of waiting for a live event. Plate-recognition device
-*configuration* (thresholds, regions, etc.) goes through the generic
-`GetConfig`/`SetConfig`/`STDXMLConfig` escape hatch — see
+recognition instead of waiting for a live event, including the scene and
+cropped-plate images when the device provides them.
+
+`PlateEvent.VehicleType`/`PlateColor`/`VehicleColor` are typed enums
+(`VehicleKind`/`PlateColorKind`/`VehicleColorKind` - HCNetSDK's `VTR_RESULT`/
+`VCA_PLATE_COLOR`/`VCR_CLR_CLASS`) since those tables are small and stable.
+`Direction` (`byDir`) is only reported by the newer ITS-format alarm.
+`Country` stays a raw byte (HCNetSDK's `COUNTRY_INDEX` is ~235 entries - see
+`HCNetSDK.h` for the table rather than mirroring it here). `RawXML` is the
+full ISAPI `<EventNotificationAlert>` document the device attaches, when it
+attaches one - it carries a long tail of firmware/device-specific fields
+(safety-belt, phone-use, dangerous-goods detection, illegal-type
+descriptions...) this package doesn't otherwise mirror into typed fields;
+parse it with `encoding/xml` if you need them.
+
+Plate-recognition device *configuration* (thresholds, regions, etc.) goes
+through the generic `GetConfig`/`SetConfig`/`STDXMLConfig` escape hatch — see
 `ConfigCommandGetPlateRecognitionParam` / `...Set...` in `anpr.go` and the
 "ANPR" Device Network SDK developer guide PDF in the vendor archive for the
 exact struct/JSON shape.
