@@ -97,11 +97,55 @@ void fill_plate_from_its(const NET_ITS_PLATE_RESULT *its, hik_plate_event &out) 
     }
 }
 
+/* parse_abs_time decodes NET_DVR_PLATE_RESULT::byAbsTime, the ASCII timestamp
+ * HCNetSDK.h documents as "yyyymmddhhmmssxxx" (xxx = milliseconds, e.g.
+ * 20260822232457993). Verified populated on real hardware, 2026-08-22.
+ *
+ * This is the ONLY timestamp NET_DVR_PLATE_RESULT carries in a usable form -
+ * unlike NET_ITS_PLATE_RESULT there is no NET_DVR_TIME struct here - and it
+ * was previously not read at all, so every plate decoded through this struct
+ * (ManualSnap and the older COMM_UPLOAD_PLATE_RESULT/COMM_PLATE_RESULT_V50
+ * alarms) reached the caller with a zero capture_time. Downstream that is
+ * indistinguishable from "this vehicle has no capture", which is exactly how
+ * it was consumed.
+ *
+ * The milliseconds are dropped: hik_time has second resolution, like every
+ * other time this package exposes. Leaves out zeroed (and so IsZero() on the
+ * Go side) unless all fourteen leading digits are present and in range, since
+ * a half-parsed date is worse than an absent one. dwRelativeTime is not a
+ * fallback - it was 0 on the same hardware that populated this field. */
+void parse_abs_time(const BYTE abs[32], hik_time &out) {
+    std::memset(&out, 0, sizeof(out));
+    for (int i = 0; i < 14; i++) {
+        if (abs[i] < '0' || abs[i] > '9') return;
+    }
+    int v[6] = {0, 0, 0, 0, 0, 0};
+    const int widths[6] = {4, 2, 2, 2, 2, 2};
+    int pos = 0;
+    for (int f = 0; f < 6; f++) {
+        for (int i = 0; i < widths[f]; i++) v[f] = v[f] * 10 + (abs[pos++] - '0');
+    }
+    if (v[0] < 1970 || v[1] < 1 || v[1] > 12 || v[2] < 1 || v[2] > 31 ||
+        v[3] > 23 || v[4] > 59 || v[5] > 60) {
+        return;
+    }
+    out.year = static_cast<uint16_t>(v[0]);
+    out.month = static_cast<uint8_t>(v[1]);
+    out.day = static_cast<uint8_t>(v[2]);
+    out.hour = static_cast<uint8_t>(v[3]);
+    out.minute = static_cast<uint8_t>(v[4]);
+    out.second = static_cast<uint8_t>(v[5]);
+    /* tz_valid stays 0: byAbsTime carries no zone, and the device is
+     * configured to site local time, which is what tz_valid=0 means to
+     * timeFromHik. */
+}
+
 void fill_plate_from_result(const NET_DVR_PLATE_RESULT *r, hik_plate_event &out) {
     std::memset(&out, 0, sizeof(out));
     std::memcpy(out.license, r->struPlateInfo.sLicense,
                 sizeof(out.license) - 1 < sizeof(r->struPlateInfo.sLicense) ? sizeof(out.license) - 1 : sizeof(r->struPlateInfo.sLicense));
     out.confidence = r->struPlateInfo.byEntireBelieve;
+    parse_abs_time(r->byAbsTime, out.capture_time);
     out.plate_color = r->struPlateInfo.byColor;
     out.vehicle_color = r->struVehicleInfo.byColor;
     // r->byVehicleType (not struVehicleInfo.byVehicleType) is the field
@@ -393,6 +437,38 @@ int32_t hik_alarm_chan_close(int32_t alarm_handle) { return NET_DVR_CloseAlarmCh
 
 /* ================================= ANPR ================================= */
 
+/* NET_DVR_ManualSnap's picture buffers are INPUTS, not outputs. This is the
+ * opposite of the alarm-callback path, where the SDK hands back pointers into
+ * memory it owns, and getting it backwards is why this call returned a plate
+ * and a confidence and no images at all for as long as it has existed:
+ * pBuffer1/pBuffer2 were left NULL by the memset, the device had nowhere to
+ * put the JPEGs it had ready, and the `result.pBuffer2 && ...` guards below
+ * then discarded lengths the device HAD reported.
+ *
+ * Verified against real hardware (iDS-TCM203-A, 2026-08-22) with a probe that
+ * ran the two variants back to back - see tarozi-post-app/tools/anpr-probe.
+ * With NULL buffers the device still reported dwPicLen=557236 and
+ * dwPicPlateLen=3620; with buffers allocated, both arrived as valid JPEGs.
+ *
+ * The layout is also NOT the "scene followed by plate, both in pBuffer2" that
+ * the comment under NET_DVR_PLATE_RESULT in HCNetSDK.h describes (which may
+ * still hold for the alarm path - untested, and deliberately left alone in
+ * fill_plate_from_result). Measured on the same hardware, exactly:
+ *
+ *     pBuffer1  <- scene snapshot,   dwPicLen bytes      (1920x1080)
+ *     pBuffer2  <- cropped plate,    dwPicPlateLen bytes (384x80)
+ *
+ * Each buffer's real JPEG length (SOI..EOI) matched its length field to the
+ * byte, pBuffer1's header was identical to a NET_DVR_CaptureJPEGPicture_NEW
+ * frame of the same channel, and pBuffer2 + dwPicLen - where the old code read
+ * the plate crop from - was untouched zeros.
+ *
+ * ON CAPACITY: the SDK is not told how large these buffers are, so this trusts
+ * the caller to pass generous ones, exactly as Hikvision's own demos do. Go's
+ * pools supply 4 MiB for the scene and 1 MiB for the crop (see anpr.go)
+ * against observed ~560 KB and ~4 KB - roughly 7x and 250x headroom. The
+ * lengths reported back are additionally clamped to the capacities so a caller
+ * can never be told to read more than it owns. */
 int32_t hik_manual_snap(int32_t user_id, int32_t channel, hik_plate_event *out,
                          uint8_t *scene_buf, uint32_t scene_buf_cap, uint32_t *scene_len,
                          uint8_t *plate_buf, uint32_t plate_buf_cap, uint32_t *plate_len) {
@@ -403,6 +479,8 @@ int32_t hik_manual_snap(int32_t user_id, int32_t channel, hik_plate_event *out,
     NET_DVR_PLATE_RESULT result;
     std::memset(&result, 0, sizeof(result));
     result.dwSize = sizeof(result);
+    result.pBuffer1 = scene_buf;
+    result.pBuffer2 = plate_buf;
 
     BOOL ok = NET_DVR_ManualSnap(user_id, &in, &result);
     if (!ok) {
@@ -410,20 +488,24 @@ int32_t hik_manual_snap(int32_t user_id, int32_t channel, hik_plate_event *out,
     }
     if (out) {
         fill_plate_from_result(&result, *out);
+        /* fill_plate_from_result reads the images the ALARM path's way (both
+         * out of pBuffer2). That is wrong for this call and would point
+         * scene_image at the small crop buffer with the large scene's length -
+         * an out-of-bounds read as soon as the caller copied it. The buffers
+         * this function was handed are the authoritative answer here, so the
+         * pointers are cleared and the caller uses scene_len/plate_len. */
+        out->scene_image = NULL;
+        out->scene_image_len = 0;
+        out->plate_image = NULL;
+        out->plate_image_len = 0;
     }
-    if (scene_buf && result.pBuffer2 && result.dwPicLen) {
-        DWORD n = result.dwPicLen < scene_buf_cap ? result.dwPicLen : scene_buf_cap;
-        std::memcpy(scene_buf, result.pBuffer2, n);
-        if (scene_len) *scene_len = n;
-    } else if (scene_len) {
-        *scene_len = 0;
+    if (scene_len) {
+        *scene_len = scene_buf == NULL ? 0
+                   : (result.dwPicLen < scene_buf_cap ? result.dwPicLen : scene_buf_cap);
     }
-    if (plate_buf && result.pBuffer2 && result.dwPicPlateLen) {
-        DWORD n = result.dwPicPlateLen < plate_buf_cap ? result.dwPicPlateLen : plate_buf_cap;
-        std::memcpy(plate_buf, result.pBuffer2 + result.dwPicLen, n);
-        if (plate_len) *plate_len = n;
-    } else if (plate_len) {
-        *plate_len = 0;
+    if (plate_len) {
+        *plate_len = plate_buf == NULL ? 0
+                   : (result.dwPicPlateLen < plate_buf_cap ? result.dwPicPlateLen : plate_buf_cap);
     }
     return 0;
 }

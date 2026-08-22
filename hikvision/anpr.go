@@ -180,20 +180,31 @@ func (d *Device) PlateEvents(ctx context.Context) (<-chan PlateEvent, error) {
 
 // manualSnapBufPool pools the scratch buffers ManualSnap hands to the SDK -
 // see the comment on scratchPool for why. Matches CaptureJPEG's 4 MiB - both
-// are a single JPEG snapshot off a device, and shim.cpp's hik_manual_snap
-// silently truncates rather than erroring if the real image exceeds this
-// buffer, so it's worth staying generous here.
+// are a single JPEG snapshot off a device.
+//
+// These are not merely a place to copy the result into: NET_DVR_ManualSnap
+// writes the JPEG directly into caller-owned memory, and the SDK is never told
+// how much of it there is (see hik_manual_snap's own comment in shim.cpp).
+// 4 MiB against an observed ~560 KB for a 1920x1080 scene is the headroom that
+// bet needs; the length reported back is clamped to this capacity regardless.
 var manualSnapBufPool = newScratchPool(4 << 20) // 4 MiB
 
 // manualSnapPlateBufPool pools the scratch buffers ManualSnap hands to the SDK
 // for the cropped plate image - see the comment on scratchPool for why. A
-// plate crop is a small sub-region of the scene image, so 1 MiB is already
-// generous relative to manualSnapBufPool's 4 MiB.
+// plate crop is a small sub-region of the scene image (measured 384x80,
+// ~4 KB), so 1 MiB is already enormous relative to manualSnapBufPool's 4 MiB.
 var manualSnapPlateBufPool = newScratchPool(1 << 20) // 1 MiB
 
 // ManualSnap triggers an immediate ANPR snapshot+recognition on channel
-// (NET_DVR_ManualSnap) and returns the decoded result, including the scene
-// and cropped-plate snapshot images when the device provides them.
+// (NET_DVR_ManualSnap) and returns the decoded result, including the scene and
+// cropped-plate snapshot images and the device's own capture time.
+//
+// Fixed 2026-08-22, verified against an iDS-TCM203-A: this used to return the
+// plate text and confidence with no images and no CaptureTime, which read as a
+// device limitation and was not one. shim.cpp's hik_manual_snap left the
+// picture buffers NULL (they are INPUTS for this call, unlike the alarm path),
+// read the two images from the wrong pointers, and never parsed byAbsTime. See
+// that function's doc comment for the measurements.
 func (d *Device) ManualSnap(channel int32) (PlateEvent, error) {
 	var out C.hik_plate_event
 	sceneBuf := manualSnapBufPool.Get()
