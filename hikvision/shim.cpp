@@ -445,10 +445,10 @@ int32_t hik_alarm_chan_close(int32_t alarm_handle) { return NET_DVR_CloseAlarmCh
  * put the JPEGs it had ready, and the `result.pBuffer2 && ...` guards below
  * then discarded lengths the device HAD reported.
  *
- * Verified against real hardware (iDS-TCM203-A, 2026-08-22) with a probe that
- * ran the two variants back to back - see tarozi-post-app/tools/anpr-probe.
- * With NULL buffers the device still reported dwPicLen=557236 and
- * dwPicPlateLen=3620; with buffers allocated, both arrived as valid JPEGs.
+ * Verified against real hardware (iDS-TCM203-A, 2026-08-22) by running the two
+ * variants back to back against the same camera, seconds apart: with NULL
+ * buffers the device still reported dwPicLen=557236 and dwPicPlateLen=3620 and
+ * delivered nothing, and with buffers allocated both arrived as valid JPEGs.
  *
  * The layout is also NOT the "scene followed by plate, both in pBuffer2" that
  * the comment under NET_DVR_PLATE_RESULT in HCNetSDK.h describes (which may
