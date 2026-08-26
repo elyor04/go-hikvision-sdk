@@ -59,6 +59,10 @@ type previewSession struct {
 	frames  chan Frame
 	closeMu sync.Mutex
 	closed  bool
+	// dropped is this session's own share of droppedFrames. The package-level counter is
+	// process-wide, so an app running several cameras at once (the normal case) cannot tell from it
+	// which stream lost data -- it would have to report every camera as damaged, or none.
+	dropped atomic.Int64
 	// done is closed exactly once, by Close, regardless of which caller
 	// triggered it (Stream.Close, Device.Close, or the ctx-watcher goroutine
 	// below) - it lets that watcher goroutine exit as soon as the session is
@@ -68,12 +72,41 @@ type previewSession struct {
 	done chan struct{}
 }
 
-// droppedFrames counts frames discarded because a previewSession's Frames()
-// channel was full - i.e. the consumer (the app's ffmpeg-feed goroutine)
-// wasn't draining fast enough. A nonzero/growing count while a stream is
-// active means something downstream is stalling and the SDK's realtime
-// callback thread is shedding load rather than blocking, which shows up as
-// visible artifacts/jumps in the remuxed output, not just delay.
+// previewChanBuffer is how many deliveries a preview session queues before deliver starts
+// shedding them (see droppedFrames). It must comfortably exceed the largest BURST HCNetSDK can
+// hand over between two consecutive receives by the consumer, which is set by the codec, not by
+// the frame rate: the SDK delivers this stream in ~4KB pieces, and one 1080p H.264 keyframe off an
+// iDS-TCM203-A SubStream is 130-440KB, i.e. roughly 30-100 pieces arriving back to back as fast as
+// the socket can be read.
+//
+// It was 64 -- less than one keyframe. Measured on that value against two live cameras
+// (2026-08-26): ~10 deliveries lost per camera per minute, with the consumer's own backlog
+// reading 0 the whole time, so this was never the documented "consumer isn't keeping up" case at
+// all. Draining into an unbounded queue on a goroutine that does nothing else did not help either;
+// the SDK's callback thread simply fills the channel faster than the Go scheduler runs any
+// receiver. Only capacity fixes it: the same test at 4096 ran with zero drops.
+//
+// Why that mattered so much more than "a dropped frame": these deliveries are PES-packet aligned,
+// so losing one punches a hole in the middle of an access unit while leaving the container framing
+// on either side of it intact. Nothing downstream can tell -- the demuxer never loses sync -- and
+// the browser is handed a well-formed, internally truncated IDR, which makes its VideoDecoder
+// raise "Decoding error" and close permanently. Two of every 46 keyframes were arriving that way.
+//
+// 1024 is ~10x the worst observed burst, and costs nothing when idle (a Go channel's buffer holds
+// slice headers; the ~4KB payloads are only retained while actually queued, and steady-state depth
+// is 0).
+const previewChanBuffer = 1024
+
+// droppedFrames counts deliveries discarded because a previewSession's
+// Frames() channel was full. This is NOT only "the consumer is too slow" as
+// this comment used to claim - it is far more often the channel being smaller
+// than one keyframe's burst, which no consumer speed can compensate for (see
+// previewChanBuffer).
+//
+// Treat any growth as data corruption, not as delay or dropped detail: a
+// delivery is a fragment of a compressed frame, so losing one leaves a hole
+// inside an access unit that downstream framing cannot detect. Callers should
+// surface this, not just record it.
 var droppedFrames atomic.Int64
 
 // DroppedFrameCount reports the cumulative number of frames dropped by
@@ -95,10 +128,12 @@ func (s *previewSession) deliver(t StreamDataType, data []byte) {
 	select {
 	case s.frames <- Frame{Type: t, Data: data}:
 	default:
-		// Consumer isn't keeping up - drop the frame rather than blocking
-		// the SDK's internal delivery thread (which would eventually stall
-		// the whole connection).
+		// The queue is full - drop rather than block the SDK's internal
+		// delivery thread (which would eventually stall the whole
+		// connection). See previewChanBuffer for why reaching this at all
+		// silently corrupts the stream, not merely thins it.
 		droppedFrames.Add(1)
+		s.dropped.Add(1)
 	}
 }
 
@@ -130,7 +165,7 @@ func (d *Device) RealPlay(ctx context.Context, channel int32, stream StreamType)
 	if err := d.checkOpen("RealPlay"); err != nil {
 		return nil, err
 	}
-	sess := &previewSession{frames: make(chan Frame, 64), done: make(chan struct{})}
+	sess := &previewSession{frames: make(chan Frame, previewChanBuffer), done: make(chan struct{})}
 	sess.handle = cgo.NewHandle(sess)
 
 	realH, err := sdkCallHandle("RealPlay", func() C.int32_t {
@@ -175,6 +210,18 @@ func (s *Stream) Frames() <-chan Frame {
 	default:
 		panic(fmt.Sprintf("hikvision: unknown stream session type %T", sess))
 	}
+}
+
+// DroppedCount reports how many deliveries THIS stream has lost because its queue was full - the
+// per-session counterpart to the process-wide DroppedFrameCount. Treat any growth as corruption of
+// this stream specifically; see droppedFrames and previewChanBuffer.
+//
+// Playback sessions do not track this and always report 0.
+func (s *Stream) DroppedCount() int64 {
+	if sess, ok := s.sess.(*previewSession); ok {
+		return sess.dropped.Load()
+	}
+	return 0
 }
 
 // Close stops the stream and releases its HCNetSDK handle.
