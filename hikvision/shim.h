@@ -139,8 +139,9 @@ typedef struct {
     uint8_t file_type;
 } hik_find_data;
 
-/* Returns: 0=NET_DVR_ISFINDING(keep polling), 1000=NET_DVR_FILE_SUCCESS(data
- * filled), 1001=NET_DVR_FILE_NOFIND, 1002=NET_DVR_NOMOREFILE, <0=error. */
+/* Returns: 1000=NET_DVR_FILE_SUCCESS(data filled), 1001=NET_DVR_FILE_NOFIND,
+ * 1002=NET_DVR_ISFINDING(keep polling), 1003=NET_DVR_NOMOREFILE,
+ * 1004=NET_DVR_FILE_EXCEPTION, <0=error. */
 int32_t hik_find_file_next(int32_t find_handle, hik_find_data *out);
 int32_t hik_find_file_close(int32_t find_handle);
 
@@ -151,7 +152,7 @@ int32_t hik_playback_stop(int32_t play_handle);
 
 int32_t hik_download_start_by_time(int32_t user_id, int32_t channel, hik_time start, hik_time stop,
                                     const char *saved_file_name);
-int32_t hik_download_get_progress(int32_t file_handle); /* 0-100, or <0 on error/done */
+int32_t hik_download_get_progress(int32_t file_handle); /* 0-100, 200=network error, -1=failed */
 int32_t hik_download_stop(int32_t file_handle);
 
 /* ================================= alarm ================================= */

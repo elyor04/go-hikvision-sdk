@@ -194,20 +194,29 @@ func (s *playbackSession) deliver(t StreamDataType, data []byte) {
 	}
 }
 
+// Close releases closeMu before NET_DVR_StopPlayBack for the reason given on
+// previewSession.Close: holding it across the stop deadlocks with a data callback in progress.
 func (s *playbackSession) Close() error {
 	s.closeMu.Lock()
-	defer s.closeMu.Unlock()
 	if s.closed {
+		s.closeMu.Unlock()
 		return nil
 	}
 	s.closed = true
 	close(s.done)
-	err := sdkCall0("StopPlayBack", func() C.int32_t {
-		return C.hik_playback_stop(C.int32_t(s.playH))
-	})
+	s.closeMu.Unlock()
+
+	err := stopPlayBack(s.playH)
 	s.handle.Delete()
 	close(s.frames)
 	return err
+}
+
+// stopPlayBack is a variable so tests can stand in for the SDK, which needs a live session.
+var stopPlayBack = func(playH int32) error {
+	return sdkCall0("StopPlayBack", func() C.int32_t {
+		return C.hik_playback_stop(C.int32_t(playH))
+	})
 }
 
 // Playback starts a server-side (remote) VOD session for channel between
@@ -279,18 +288,33 @@ type DownloadSession struct {
 	fileH int32
 }
 
-// Progress returns 0-100, or -1 once the download has finished (whether it
-// succeeded or failed - check the error from Wait/Stop for the outcome).
+// Progress returns NET_DVR_GetDownloadPos as is: 0-100 while downloading (100
+// = complete), 200 if the network failed, -1 if the call itself failed.
 func (s *DownloadSession) Progress() int32 {
 	return int32(C.hik_download_get_progress(C.int32_t(s.fileH)))
 }
 
-// Wait polls Progress until the download completes (100% or an error/stop).
+// Wait polls Progress until the download completes, returning an error if
+// it failed instead.
 func (s *DownloadSession) Wait(ctx context.Context) error {
 	for {
-		p := s.Progress()
-		if p >= 100 || p < 0 {
+		var p int32
+		var err error
+		func() {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			p = s.Progress()
+			if p < 0 {
+				err = lastError("GetDownloadPos")
+			}
+		}()
+		switch {
+		case err != nil:
+			return err
+		case p == 100:
 			return nil
+		case p > 100:
+			return fmt.Errorf("hikvision: download failed: network error (GetDownloadPos %d)", p)
 		}
 		select {
 		case <-ctx.Done():

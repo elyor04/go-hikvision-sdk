@@ -77,6 +77,7 @@ type Event struct {
 var (
 	alarmMu       sync.RWMutex
 	alarmOnce     sync.Once
+	alarmErr      error
 	alarmSubs     = map[int32]chan Event{}
 	exceptionMu   sync.Mutex
 	exceptionSubs []func(ExceptionType, int32, int32)
@@ -180,12 +181,13 @@ func (d *Device) Alarms(ctx context.Context) (<-chan Event, error) {
 	if err := d.checkOpen("Alarms"); err != nil {
 		return nil, err
 	}
-	var setupErr error
+	// alarmErr is package-level, like exceptionErr: a local would be nil on every call after a
+	// failed first one, and those calls would subscribe with no callback registered.
 	alarmOnce.Do(func() {
-		setupErr = C_setAlarmCallback()
+		alarmErr = C_setAlarmCallback()
 	})
-	if setupErr != nil {
-		return nil, setupErr
+	if alarmErr != nil {
+		return nil, alarmErr
 	}
 
 	alarmH, err := sdkCallHandle("SetupAlarmChan", func() C.int32_t {

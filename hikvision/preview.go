@@ -137,20 +137,33 @@ func (s *previewSession) deliver(t StreamDataType, data []byte) {
 	}
 }
 
+// Close must not hold closeMu across NET_DVR_StopRealPlay: the SDK waits there for a data
+// callback already in progress, and that callback needs closeMu to get through deliver. Holding
+// it deadlocked both - Close never returned, and the SDK's callback thread stayed blocked for
+// good (reproduced against an NVR, 2026-10-09). With closed set first, a callback that lands
+// during the stop is discarded by deliver; none arrive once the stop has returned (measured on
+// the same NVR), so the handle and the channel are released after it.
 func (s *previewSession) Close() error {
 	s.closeMu.Lock()
-	defer s.closeMu.Unlock()
 	if s.closed {
+		s.closeMu.Unlock()
 		return nil
 	}
 	s.closed = true
 	close(s.done)
-	err := sdkCall0("StopRealPlay", func() C.int32_t {
-		return C.hik_realplay_stop(C.int32_t(s.realH))
-	})
+	s.closeMu.Unlock()
+
+	err := stopRealPlay(s.realH)
 	s.handle.Delete()
 	close(s.frames)
 	return err
+}
+
+// stopRealPlay is a variable so tests can stand in for the SDK, which needs a live session.
+var stopRealPlay = func(realH int32) error {
+	return sdkCall0("StopRealPlay", func() C.int32_t {
+		return C.hik_realplay_stop(C.int32_t(realH))
+	})
 }
 
 // RealPlay starts a live stream on the given channel (1-based, per HCNetSDK
@@ -199,8 +212,9 @@ type Stream struct {
 }
 
 // Frames returns the channel Frame values are delivered on. It is closed
-// when the stream stops (either explicitly via Close, or because the
-// underlying HCNetSDK connection was torn down).
+// when the stream is closed (Close, ctx, or Device.Close). A dropped
+// connection does NOT close it - the channel just goes quiet; watch
+// OnException (ExceptionPreview) or a read timeout to notice.
 func (s *Stream) Frames() <-chan Frame {
 	switch sess := s.sess.(type) {
 	case *previewSession:
