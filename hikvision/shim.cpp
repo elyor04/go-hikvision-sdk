@@ -54,7 +54,12 @@ void fill_alarmer(const NET_DVR_ALARMER *in, hik_alarmer &out) {
     std::memcpy(out.serial_number, in->sSerialNumber, sizeof(out.serial_number) < sizeof(in->sSerialNumber) ? sizeof(out.serial_number) : sizeof(in->sSerialNumber));
 }
 
-void fill_plate_from_its(const NET_ITS_PLATE_RESULT *its, hik_plate_event &out) {
+/* NET_ITS_PLATE_RESULT and NET_DVR_PLATE_RESULT_V50 share the field names and
+ * types read here (struPlateInfo, struVehicleInfo, byVehicleType, byDir,
+ * byDriveChan, struSnapFirstPicTime, dwPicNum, struPicInfo[6]), so one body
+ * decodes both. NET_DVR_PLATE_RESULT is a different, older layout. */
+template <typename ITS_LIKE>
+void fill_plate_from_its(const ITS_LIKE *its, hik_plate_event &out) {
     std::memset(&out, 0, sizeof(out));
     std::memcpy(out.license, its->struPlateInfo.sLicense,
                 sizeof(out.license) - 1 < sizeof(its->struPlateInfo.sLicense) ? sizeof(out.license) - 1 : sizeof(its->struPlateInfo.sLicense));
@@ -161,17 +166,27 @@ void fill_plate_from_result(const NET_DVR_PLATE_RESULT *r, hik_plate_event &out)
         out.raw_xml = reinterpret_cast<const uint8_t *>(r->struPlateInfo.pXmlBuf);
         out.raw_xml_len = r->struPlateInfo.dwXmlLen;
     }
-    if (r->pBuffer2 && r->dwPicLen) {
+    if (r->pBuffer1 && r->dwPicLen) {
+        /* Two-buffer layout, as measured on an iDS-TCM203-A for this same
+         * struct in hik_manual_snap: scene in pBuffer1 (dwPicLen bytes), the
+         * plate crop alone in pBuffer2 (dwPicPlateLen bytes). pBuffer2 +
+         * dwPicLen would point ~dwPicLen bytes past the end of the crop. */
+        out.scene_image = r->pBuffer1;
+        out.scene_image_len = r->dwPicLen;
+        if (r->pBuffer2 && r->dwPicPlateLen) {
+            out.plate_image = r->pBuffer2;
+            out.plate_image_len = r->dwPicPlateLen;
+        }
+    } else if (r->pBuffer2 && r->dwPicLen) {
+        /* Combined layout the header documents ("scene snapshot picture +
+         * license snapshot picture" in pBuffer2): the crop follows the scene
+         * in the same buffer. Only used when there is no pBuffer1. */
         out.scene_image = r->pBuffer2;
         out.scene_image_len = r->dwPicLen;
-    }
-    // pBuffer2 holds the scene snapshot followed immediately by the license
-    // plate snapshot (see the comment after NET_DVR_PLATE_RESULT's definition
-    // in HCNetSDK.h) - the plate crop is the dwPicPlateLen bytes right after
-    // the scene image's dwPicLen bytes, not a separate buffer.
-    if (r->pBuffer2 && r->dwPicPlateLen) {
-        out.plate_image = r->pBuffer2 + r->dwPicLen;
-        out.plate_image_len = r->dwPicPlateLen;
+        if (r->dwPicPlateLen) {
+            out.plate_image = r->pBuffer2 + r->dwPicLen;
+            out.plate_image_len = r->dwPicPlateLen;
+        }
     }
 }
 
@@ -222,8 +237,10 @@ extern "C" void CALLBACK alarm_trampoline(LONG lCommand, NET_DVR_ALARMER *pAlarm
         if (lCommand == HIK_COMM_ITS_PLATE_RESULT && dwBufLen >= sizeof(NET_ITS_PLATE_RESULT)) {
             fill_plate_from_its(reinterpret_cast<const NET_ITS_PLATE_RESULT *>(pAlarmInfo), plate);
             is_plate = 1;
-        } else if ((lCommand == HIK_COMM_UPLOAD_PLATE_RESULT || lCommand == HIK_COMM_PLATE_RESULT_V50) &&
-                   dwBufLen >= sizeof(NET_DVR_PLATE_RESULT)) {
+        } else if (lCommand == HIK_COMM_PLATE_RESULT_V50 && dwBufLen >= sizeof(NET_DVR_PLATE_RESULT_V50)) {
+            fill_plate_from_its(reinterpret_cast<const NET_DVR_PLATE_RESULT_V50 *>(pAlarmInfo), plate);
+            is_plate = 1;
+        } else if (lCommand == HIK_COMM_UPLOAD_PLATE_RESULT && dwBufLen >= sizeof(NET_DVR_PLATE_RESULT)) {
             fill_plate_from_result(reinterpret_cast<const NET_DVR_PLATE_RESULT *>(pAlarmInfo), plate);
             is_plate = 1;
         }
@@ -498,6 +515,11 @@ int32_t hik_manual_snap(int32_t user_id, int32_t channel, hik_plate_event *out,
         out->scene_image_len = 0;
         out->plate_image = NULL;
         out->plate_image_len = 0;
+        /* raw_xml points into SDK-owned memory (result.struPlateInfo.pXmlBuf)
+         * that is only guaranteed valid inside this call; the Go side copies
+         * it after we return. Same treatment as the images. */
+        out->raw_xml = NULL;
+        out->raw_xml_len = 0;
     }
     if (scene_len) {
         *scene_len = scene_buf == NULL ? 0

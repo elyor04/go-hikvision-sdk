@@ -39,9 +39,11 @@ type Device struct {
 	// Info is the device information returned at login time.
 	Info DeviceInfo
 
-	mu       sync.Mutex
-	closed   bool
-	sessions map[io_Closer]struct{}
+	mu     sync.Mutex
+	closed bool
+	// closeDone is closed when the Close that won the race has finished its Logout.
+	closeDone chan struct{}
+	sessions  map[io_Closer]struct{}
 }
 
 // io_Closer avoids importing io just for this internal bookkeeping type set.
@@ -89,9 +91,10 @@ func Login(opts LoginOptions) (*Device, error) {
 	}
 
 	return &Device{
-		userID:   userID,
-		Info:     deviceInfoFromC(&out),
-		sessions: make(map[io_Closer]struct{}),
+		userID:    userID,
+		Info:      deviceInfoFromC(&out),
+		sessions:  make(map[io_Closer]struct{}),
+		closeDone: make(chan struct{}),
 	}, nil
 }
 
@@ -139,9 +142,13 @@ func (d *Device) Close() error {
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
+		// Wait for the Close in flight: returning now told supervise-style callers the Logout
+		// was over while it was still running, and they Login again on top of it.
+		<-d.closeDone
 		return nil
 	}
 	d.closed = true
+	defer close(d.closeDone)
 	sessions := make([]io_Closer, 0, len(d.sessions))
 	for c := range d.sessions {
 		sessions = append(sessions, c)
